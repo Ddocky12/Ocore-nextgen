@@ -1,0 +1,108 @@
+#!/system/bin/sh
+# ==============================================================================
+# Ocore Unified Performance Engine v3.2.0-NextGen — On-Demand Frame & FPS Monitor
+# Binary Path: /data/adb/modules/Ocore/system/bin/ocore-fps-daemon
+#
+# Implements Priority 1.4 & Priority 5.2:
+#   - Single-instance PID + /proc/<pid>/cmdline identity verification
+#   - Strictly runs ONLY when a validated game from cortex/thunderclash/gamelist.txt
+#     is active in foreground (SESSION_STATE=OVERLAY_ACTIVE)
+#   - Immediately purges stale cache and suspends/exits when no game is active
+#   - Zero CPU/RAM overhead when device is idle or running non-game apps
+# ==============================================================================
+
+MODDIR="${MODDIR_OVERRIDE:-/data/adb/modules/Ocore}"
+[ ! -d "$MODDIR" ] && MODDIR="/data/adb/modules/Ocore"
+OCORE_DIR="${OCORE_DIR_OVERRIDE:-/data/adb/ocore}"
+OCORE_CONF="$OCORE_DIR/config.conf"
+STATE_DIR="$OCORE_DIR/state"
+LOG_DIR="$OCORE_DIR/logs"
+DAEMON_LOG="$LOG_DIR/daemons_watchdog.log"
+PID_FILE="$STATE_DIR/pid_ocore_fpsmon"
+CACHE_FILE="$STATE_DIR/frame_stats.cache"
+GAMELIST_TXT="$MODDIR/cortex/thunderclash/gamelist.txt"
+
+mkdir -p "$STATE_DIR" "$LOG_DIR" 2>/dev/null
+
+verify_prev_fps_pid() {
+  _vpf_pid="$1"
+  [ -z "$_vpf_pid" ] || [ "$_vpf_pid" = "$$" ] || [ ! -d "/proc/$_vpf_pid" ] && return 1
+  _vpf_cmd=$(tr '\0' ' ' < "/proc/$_vpf_pid/cmdline" 2>/dev/null)
+  _vpf_comm=$(cat "/proc/$_vpf_pid/comm" 2>/dev/null)
+  case "$_vpf_cmd $_vpf_comm" in
+    *ocore-fps-daemon*) return 0 ;;
+  esac
+  return 1
+}
+
+if [ -f "$PID_FILE" ]; then
+  old_pid=$(cat "$PID_FILE" 2>/dev/null | tr -dc '0-9')
+  if verify_prev_fps_pid "$old_pid"; then
+    kill -TERM "$old_pid" 2>/dev/null
+    sleep 0.2 2>/dev/null || sleep 1
+  fi
+fi
+
+echo "$$" > "$PID_FILE"
+[ -w "/proc/$$/oom_score_adj" ] && echo "-300" > "/proc/$$/oom_score_adj" 2>/dev/null
+
+cleanup_daemon() {
+  cur_p=$(cat "$PID_FILE" 2>/dev/null | tr -dc '0-9')
+  if [ "$cur_p" = "$$" ]; then
+    rm -f "$PID_FILE" "$CACHE_FILE" "${CACHE_FILE}.tmp" 2>/dev/null
+  fi
+  exit 0
+}
+trap cleanup_daemon INT TERM EXIT
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [OCORE_FPSMON] Ocore On-Demand Frame Monitor v3.2.0-NextGen started (PID=$$)" >> "$DAEMON_LOG" 2>/dev/null
+
+IDLE_TICKS=0
+while true; do
+  echo "$$" > "$PID_FILE"
+  screen_off=$(cat "$STATE_DIR/screen_off_state" 2>/dev/null | tr -dc '0-9')
+  if [ "$screen_off" = "1" ]; then
+    rm -f "$CACHE_FILE" "${CACHE_FILE}.tmp" 2>/dev/null
+    exit 0
+  fi
+
+  active_pkg=$(cat "$STATE_DIR/active_game_pkg" 2>/dev/null | tr -d '[:space:]')
+  [ "$active_pkg" = "None" ] && active_pkg=""
+  [ -z "$active_pkg" ] && active_pkg=$(cat "$MODDIR/cortex/thunderclash/game-active.txt" 2>/dev/null | tr -d '[:space:]')
+
+  # Validate that active_pkg is in GameList and process is alive
+  valid_game=0
+  if [ -n "$active_pkg" ] && [ -f "$GAMELIST_TXT" ] && grep -qx "$active_pkg" "$GAMELIST_TXT" 2>/dev/null; then
+    if [ -n "$(/system/bin/toybox pidof "$active_pkg" 2>/dev/null)" ]; then
+      valid_game=1
+    fi
+  fi
+
+  if [ "$valid_game" -eq 1 ]; then
+    IDLE_TICKS=0
+    stats_out=$("$MODDIR/system/bin/ocorectl" frame_stats --direct 2>/dev/null)
+    if [ -n "$stats_out" ]; then
+      echo "$stats_out" > "${CACHE_FILE}.tmp" 2>/dev/null
+      mv -f "${CACHE_FILE}.tmp" "$CACHE_FILE" 2>/dev/null
+
+      therm_st=$(cat "$STATE_DIR/thermal_state" 2>/dev/null | tr -d '[:space:]')
+      if [ "${therm_st:-NORMAL}" = "NORMAL" ]; then
+        jank_int=$(echo "$stats_out" | awk -F= '/^JANK_PCT=/ {gsub(/[^0-9.]/, "", $2); printf "%d", $2; exit}')
+        if [ "${jank_int:-0}" -ge 15 ] 2>/dev/null; then
+          sh "$MODDIR/cortex/thunderclash/ocore.sh" >/dev/null 2>&1
+        fi
+      fi
+    fi
+    sleep 2
+  else
+    # Immediately purge stale FPS cache when no validated game is active
+    rm -f "$CACHE_FILE" "${CACHE_FILE}.tmp" 2>/dev/null
+    IDLE_TICKS=$((IDLE_TICKS + 1))
+    # Suspend/exit daemon when no game is active so zero idle CPU/polling occurs
+    if [ "$IDLE_TICKS" -ge 2 ]; then
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [OCORE_FPSMON] No active game session; suspending FPS monitor to save resources." >> "$DAEMON_LOG" 2>/dev/null
+      exit 0
+    fi
+    sleep 2
+  fi
+done

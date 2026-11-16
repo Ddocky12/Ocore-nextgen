@@ -1,0 +1,97 @@
+#!/system/bin/sh
+# ==============================================================================
+# Ocore Unified Performance Engine v2.1 — Bypass Charging Keeper Daemon
+# Binary Path: /data/adb/modules/Ocore/engine/ocore-bypass
+# Native Ocore Bypass Charging Keeper Daemon
+# ==============================================================================
+
+MODDIR="${MODDIR_OVERRIDE:-/data/adb/modules/Ocore}"
+[ ! -d "$MODDIR" ] && MODDIR="/data/adb/modules/Ocore"
+OCORE_DIR="/data/adb/ocore"
+OCORE_CONF="$OCORE_DIR/config.conf"
+STATE_DIR="$OCORE_DIR/state"
+LOG_DIR="$OCORE_DIR/logs"
+DAEMON_LOG="$LOG_DIR/daemons_watchdog.log"
+STATUS_FILE="$MODDIR/cortex/bypass/status.txt"
+PID_FILE="$STATE_DIR/pid_ocore_bypass"
+
+mkdir -p "$STATE_DIR" "$LOG_DIR" "$MODDIR/cortex/bypass" 2>/dev/null
+
+if [ -f "$PID_FILE" ]; then
+  old_pid=$(cat "$PID_FILE" 2>/dev/null | tr -dc '0-9')
+  if [ -n "$old_pid" ] && [ "$old_pid" != "$$" ] && [ -d "/proc/$old_pid" ]; then
+    kill -TERM "$old_pid" 2>/dev/null
+  fi
+fi
+
+echo "$$" > "$PID_FILE"
+
+cleanup_bypass() {
+  cur_p=$(cat "$PID_FILE" 2>/dev/null | tr -dc '0-9')
+  [ "$cur_p" = "$$" ] && rm -f "$PID_FILE" 2>/dev/null
+  exit 0
+}
+trap cleanup_bypass INT TERM EXIT
+
+detect_chg_node() {
+  for node in \
+    "/proc/mtk_battery_cmd/current_cmd" \
+    "/sys/class/power_supply/battery/charging_enabled" \
+    "/sys/class/power_supply/battery/BatteryChargingEnabled" \
+    "/sys/class/power_supply/battery/input_suspend" \
+    "/sys/class/power_supply/battery/battery_input_suspend" \
+    "/proc/driver/charger_limit_enable" \
+    "/sys/devices/platform/mt-battery/disable_charger" \
+    "/sys/devices/platform/charger/bypass_charger"; do
+    if [ -e "$node" ]; then
+      echo "$node"
+      return 0
+    fi
+  done
+  echo "UNSUPPORTED"
+  return 1
+}
+
+apply_chg_state() {
+  node="$1"
+  mode="$2"
+  [ "$node" = "UNSUPPORTED" ] || [ ! -e "$node" ] && return 1
+  chmod 0644 "$node" 2>/dev/null
+  case "$node" in
+    *current_cmd)
+      if [ "$mode" = "disable_charging" ]; then echo "0 1" > "$node" 2>/dev/null; else echo "0 0" > "$node" 2>/dev/null; fi
+      ;;
+    *input_suspend|*disable_charger|*bypass_charger)
+      if [ "$mode" = "disable_charging" ]; then echo "1" > "$node" 2>/dev/null; else echo "0" > "$node" 2>/dev/null; fi
+      ;;
+    *charging_enabled|*BatteryChargingEnabled|*charger_limit_enable)
+      if [ "$mode" = "disable_charging" ]; then echo "0" > "$node" 2>/dev/null; else echo "1" > "$node" 2>/dev/null; fi
+      ;;
+  esac
+}
+
+CHG_NODE=$(detect_chg_node)
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [OCORE_BYPASS] Bypass Charging Keeper started (PID=$$, node=$CHG_NODE)" >> "$DAEMON_LOG" 2>/dev/null
+
+while true; do
+  echo "$$" > "$PID_FILE"
+  BYPASS_CHG_ENABLE="0"
+  BYPASS_CHG_THRESHOLD="20"
+  [ -f "$OCORE_CONF" ] && . "$OCORE_CONF"
+
+  st=$(tr -d '[:space:]' < "$STATUS_FILE" 2>/dev/null)
+  if [ "$st" = "0" ] || [ "$st" = "off" ] || { [ "$BYPASS_CHG_ENABLE" = "0" ] && [ "${SMART_CHARGE_LIMIT:-0}" = "0" ]; }; then
+    apply_chg_state "$CHG_NODE" "enable_charging"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [OCORE_BYPASS] Bypass Charging Keeper exiting cleanly (disabled)." >> "$DAEMON_LOG" 2>/dev/null
+    exit 0
+  fi
+
+  cap=$(cat /sys/class/power_supply/battery/capacity 2>/dev/null | tr -dc '0-9')
+  if [ -n "$cap" ] && [ "$cap" -lt "${BYPASS_CHG_THRESHOLD:-20}" ] 2>/dev/null && [ "$BYPASS_CHG_ENABLE" = "1" ]; then
+    apply_chg_state "$CHG_NODE" "enable_charging"
+  else
+    apply_chg_state "$CHG_NODE" "disable_charging"
+  fi
+
+  sleep 10
+done

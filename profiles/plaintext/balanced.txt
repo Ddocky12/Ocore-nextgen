@@ -1,0 +1,120 @@
+Sec_Chip_Name
+MT6877
+Sec_End
+Sec_CD_TM
+/proc/mtkcooler/mtktscpu-sysrst
+
+/proc/mtkcooler/cpu_adaptive_0
+mtktsAP 56000 EXIT 12000
+/proc/mtkcooler/cpu_adaptive_1
+mtktsAP 52000 EXIT 12000
+/proc/mtkcooler/mtktspmic-sysrst
+
+/proc/mtkcooler/mtktsbattery-sysrst
+
+/proc/mtkcooler/mtk-cl-kshutdown00
+
+/proc/mtkcooler/mtktscharger-sysrst
+
+/proc/mtkcooler/mtktswmt-sysrst
+
+/proc/mtkcooler/mtktswmt-pa1
+mtktsAP 78000 EXIT 9500
+/proc/mtkcooler/mtktsAP-sysrst
+
+/proc/mtkcooler/mtk-cl-kshutdown03
+
+/proc/mtkcooler/mtk-cl-cam00
+EXIT 9000
+/proc/mtkcooler/abcct_lcmoff
+EXIT 3500
+/proc/mtkcooler/abcct
+EXIT 3500
+/proc/mtkcooler/mtk-cl-kshutdown01
+
+/proc/mtkcooler/mtk-cl-mdoff-nr
+EXIT 6000
+/proc/mtkcooler/mtk-cl-noIMS-nr
+EXIT 5000
+/proc/mtkcooler/mtk-cl-adp-mutt-nr
+EXIT 5000
+/proc/mtkcooler/mtk-cl-kshutdown02
+
+/proc/mtkcooler/mtk-cl-mdoff
+EXIT 6000
+/proc/mtkcooler/mtk-cl-noIMS
+EXIT 5000
+/proc/mtkcooler/mtk-cl-adp-mutt
+EXIT 5000
+Sec_End
+Sec_ITP
+/proc/driver/thermal/tzbts_param
+PUP_R 100000 PUP_VOLT 1800 OVER_CRITICAL_L 4397119 NTC_TABLE 7 0
+/proc/driver/thermal/tzbtspa_param
+PUP_R 100000 PUP_VOLT 1800 OVER_CRITICAL_L 4397119 NTC_TABLE 7 1
+/proc/driver/thermal/tzbtsnrpa_param
+PUP_R 100000 PUP_VOLT 1800 OVER_CRITICAL_L 4397119 NTC_TABLE 7 2
+/proc/driver/thermal/clatm_setting
+0 1800 8 13 1 650 0 320 0
+/proc/driver/thermal/clatm_setting
+1 900 8 13 1 320 0 220 0
+/proc/driver/thermal/clbcct
+0 600 380 180
+/proc/driver/thermal/clmutt_setting
+0 70000 70000 6 10 14 6 10 14
+/proc/driver/thermal/clctm
+2 83000 56000 46000 48000 74000 50000 720000 12000 500000 9000 350 350 16000
+/proc/driver/thermal/clabcct
+47000 800 180000 4 2000 0 0 2600 0 1
+/proc/driver/thermal/clabcct_lcmoff
+1 49000 800 180000 4 2400 600
+/proc/driver/thermal/clatm_cpu_min_opp
+0 2 6 9 3 13 1 15
+/proc/driver/thermal/clatm_cpu_min_opp
+1 2 6 10 2 15 0 0
+/proc/driver/thermal/wifi_in_soc
+1 0 4 0 89000 6000 1200 50 200 6000 200 200 12000 12000
+/proc/driver/thermal/sspm_thermal_throttle
+0
+Sec_End
+Sec_RTP
+/proc/driver/thermal/tzcpu
+3 120000 0 mtktscpu-sysrst 83000 0 cpu_adaptive_0 78000 0 cpu_adaptive_1 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 200
+/proc/driver/thermal/tzpmic
+1 138000 0 mtktspmic-sysrst 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 1000
+/proc/driver/thermal/tzbattery
+1 59000 0 mtktsbattery-sysrst 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 1000
+/proc/driver/thermal/tzpa
+1 123000 0 mtk-cl-kshutdown00 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 2000
+/proc/driver/thermal/tzcharger
+1 123000 0 mtktscharger-sysrst 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 2000
+/proc/driver/thermal/tzwmt
+2 117000 0 mtktswmt-sysrst 76000 0 mtktswmt-pa1 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 1000
+/proc/driver/thermal/tzbts
+5 106000 0 mtktsAP-sysrst 97000 0 mtk-cl-kshutdown03 62000 0 mtk-cl-cam00 49000 0 abcct_lcmoff 47000 0 abcct 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 1000
+/proc/driver/thermal/tzbtsnrpa
+4 123000 0 mtk-cl-kshutdown01 115000 0 mtk-cl-mdoff-nr 105000 0 mtk-cl-noIMS-nr 70000 0 mtk-cl-adp-mutt-nr 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 1000
+/proc/driver/thermal/tzbtspa
+4 123000 0 mtk-cl-kshutdown02 115000 0 mtk-cl-mdoff 105000 0 mtk-cl-noIMS 70000 0 mtk-cl-adp-mutt 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 0 0 no-cooler 1000
+Sec_End
+Sec_TZ_TM
+/proc/mtktz/mtktscpu
+ma_len 3
+/proc/mtktz/mtktspmic
+ma_len 4
+/proc/mtktz/mtktsbattery
+ma_len 4
+/proc/mtktz/mtktspa
+ma_len 2
+/proc/mtktz/mtktscharger
+ma_len 2
+/proc/mtktz/mtktswmt
+ma_len 2
+/proc/mtktz/mtktsAP
+ma_len 3
+/proc/mtktz/mtktsbtsnrpa
+ma_len 2
+/proc/mtktz/mtktsbtsmdpa
+ma_len 2
+Sec_End
+EOF

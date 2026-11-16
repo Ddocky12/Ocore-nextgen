@@ -1,0 +1,20 @@
+# ==============================================================================
+# Ocore Unified Performance Engine v3.0.0-NextGen — System & Thermal Properties
+# Default Mode: Balanced | Hardware-Aware Safe Configuration
+# ==============================================================================
+vendor.thermal.mode=balanced
+persist.vendor.powerhal.smart_thermal=1
+persist.sys.ocore.engine.version=3.0.0
+persist.sys.ocore.engine.state=initialized
+
+# Ocore Freeform & Multi-Window Support
+persist.sys.freeform_hack_infinix=true
+persist.sys.freeform_windows=true
+persist.sys.multi_window_mode=true
+persist.sys.multi_window_enabled=true
+persist.sys.multi_window_freeform=true
+persist.sys.window_mode_supported=true
+persist.sys.support_freeform=true
+persist.sys.split_screen_mode=true
+persist.sys.allow_split_screen=true
+persist.sys.force_split_screen_for_all_apps=true

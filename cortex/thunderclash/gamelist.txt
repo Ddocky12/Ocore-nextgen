@@ -1,0 +1,7 @@
+com.mojang.minecraftpe
+com.netease.yysls
+com.garena.game.codm
+com.digitalextremes.warframemobile
+com.proximabeta.mf.uamo
+com.miHoYo.GenshinImpact
+com.mobile.legends

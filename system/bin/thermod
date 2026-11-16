@@ -1,0 +1,573 @@
+#!/system/bin/sh
+# ==============================================================================
+# Ocore Thermal Intelligence CLI (thermod v6.0 — Ocore v3.2.0-NextGen Multi-SoC Adaptive)
+# Fixes based on on-device diagnostic log (Ocore_v2.1_Diagnostic_20261109_001750.log):
+#   1. Filters out disconnected camera ISP dummy zones (tzimgs0..12 with raw=-127000)
+#   2. Automatically falls back to /sys/class/thermal/thermal_zone5 (mtktspa) &
+#      thermal_zone7 (mtktswmt) when /proc/mtktz/mtktspa or mtktswmt returns UNAVAILABLE
+#   3. Uses realistic charging/ambient Battery thresholds (45°C Warm / 48°C Hot / 51°C Crit)
+#      so normal 42-44°C operation on Infinix X6815D does not trigger false HOT overrides
+#   4. Preserves stock hardware trip-point tables by default (ALLOW_TRIP_POINT_MOD=0)
+# ==============================================================================
+
+MODDIR="${MODDIR_OVERRIDE:-/data/adb/modules/Ocore}"
+[ ! -d "$MODDIR" ] && MODDIR="/data/adb/modules/Ocore"
+if [ ! -d "$MODDIR" ]; then
+  SCRIPT_DIR="${0%/*}"
+  if [ -f "$SCRIPT_DIR/../../profiles/performance.conf" ]; then
+    MODDIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+  fi
+fi
+
+OCORE_DIR="${OCORE_DIR_OVERRIDE:-/data/adb/ocore}"
+OCORE_CONF="$OCORE_DIR/config.conf"
+STATE_DIR="$OCORE_DIR/state"
+PERSIST_DIR="${THERMOD_DIR_OVERRIDE:-/data/adb/thermod_mt6877}"
+CONFIG_FILE="$PERSIST_DIR/config.conf"
+LOG_FILE="$PERSIST_DIR/logs/thermod.log"
+OCORE_LOG="$OCORE_DIR/logs/ocore_events.log"
+
+mkdir -p "$PERSIST_DIR/logs" "$OCORE_DIR/logs" "$STATE_DIR" 2>/dev/null
+
+log_msg() {
+  ts="$(date '+%Y-%m-%d %H:%M:%S')"
+  echo "[$ts] $1" >> "$LOG_FILE" 2>/dev/null
+  echo "[$ts] [INFO] [OCORE_THERMAL] $1" >> "$OCORE_LOG" 2>/dev/null
+}
+
+load_config() {
+  PROFILE="balanced"
+  SMART_GUARD="1"
+  FPSGO_UNLOCK="1"
+  GED_BOOST="1"
+  SYNC_MTC_PROFILES="1"
+  ALLOW_TRIP_POINT_MOD="0"
+  THERMAL_STATE="NORMAL"
+  # Realistic Domain-Specific Thresholds (°C) tuned for Infinix X6815D / MT6877
+  CPU_WARM_C=75;  CPU_HOT_C=82;  CPU_CRIT_C=90
+  GPU_WARM_C=72;  GPU_HOT_C=80;  GPU_CRIT_C=88
+  SOC_WARM_C=62;  SOC_HOT_C=70;  SOC_CRIT_C=78
+  BAT_WARM_C=45;  BAT_HOT_C=48;  BAT_CRIT_C=51
+  THERM_HYST_C=2
+  THERM_COOLDOWN_SEC=30
+
+  [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+  if [ -f "$OCORE_CONF" ]; then
+    . "$OCORE_CONF"
+    [ -n "$GLOBAL_PROFILE" ] && PROFILE="$GLOBAL_PROFILE"
+  fi
+  [ -f "$STATE_DIR/thermal_state" ] && THERMAL_STATE="$(cat "$STATE_DIR/thermal_state" 2>/dev/null)"
+}
+
+save_config_key() {
+  key="$1"
+  val="$2"
+  mkdir -p "$PERSIST_DIR" 2>/dev/null
+  if [ ! -f "$CONFIG_FILE" ]; then
+    cat << 'EOC' > "$CONFIG_FILE"
+PROFILE=balanced
+SMART_GUARD=1
+FPSGO_UNLOCK=1
+GED_BOOST=1
+SYNC_MTC_PROFILES=1
+ALLOW_TRIP_POINT_MOD=0
+EOC
+  fi
+  if grep -q "^${key}=" "$CONFIG_FILE" 2>/dev/null; then
+    sed -i "s/^${key}=.*/${key}=${val}/" "$CONFIG_FILE"
+  else
+    echo "${key}=${val}" >> "$CONFIG_FILE"
+  fi
+  if [ -f "$OCORE_CONF" ]; then
+    oc_key="$key"
+    [ "$key" = "PROFILE" ] && oc_key="GLOBAL_PROFILE"
+    if grep -q "^${oc_key}=" "$OCORE_CONF" 2>/dev/null; then
+      sed -i "s/^${oc_key}=.*/${oc_key}=${val}/" "$OCORE_CONF"
+    fi
+  fi
+}
+
+update_module_prop_desc() {
+  p_upper=$(echo "$1" | tr 'a-z' 'A-Z')
+  if [ -f "$MODDIR/module.prop" ]; then
+    sed -i "s/^description=.*/description=[Arbiter: ${p_upper} | Thermal: ${THERMAL_STATE:-NORMAL}] Ocore v3.2.0-NextGen Unified Android Performance Engine/" "$MODDIR/module.prop" 2>/dev/null
+  fi
+}
+
+inject_plaintext_to_proc() {
+  txt_file="$1"
+  [ ! -f "$txt_file" ] && return 1
+  load_config
+
+  soc_str="$(getprop ro.board.platform) $(getprop ro.hardware) $(getprop ro.soc.model)"
+  is_mt6877=0
+  case "$(echo "$soc_str" | tr '[:upper:]' '[:lower:]')" in
+    *mt6877*) is_mt6877=1 ;;
+  esac
+
+  target_proc=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$(printf '\r')}"
+    case "$line" in
+      /proc/*)
+        target_proc="$line"
+        ;;
+      Sec_*|EOF|"")
+        target_proc=""
+        ;;
+      *)
+        if [ -n "$target_proc" ] && [ -e "$target_proc" ]; then
+          case "$target_proc" in
+            *sysrst*|*kshutdown*)
+              target_proc=""
+              continue
+              ;;
+          esac
+          case "$target_proc" in
+            /proc/driver/thermal/tz*)
+              if [ "${ALLOW_TRIP_POINT_MOD:-0}" != "1" ] || [ "$is_mt6877" != "1" ]; then
+                target_proc=""
+                continue
+              fi
+              ;;
+          esac
+          echo "$line" > "$target_proc" 2>/dev/null
+        fi
+        target_proc=""
+        ;;
+    esac
+  done < "$txt_file"
+  return 0
+}
+
+apply_subsystem_tuning() {
+  target_prof="$1"
+  load_config
+
+  soc_str="$(getprop ro.board.platform) $(getprop ro.hardware) $(getprop ro.soc.model)"
+  is_mt6877=0
+  case "$(echo "$soc_str" | tr '[:upper:]' '[:lower:]')" in
+    *mt6877*) is_mt6877=1 ;;
+  esac
+
+  TP_ENC="$MODDIR/profiles/${target_prof}.conf"
+  TP_TXT="$MODDIR/profiles/plaintext/${target_prof}.txt"
+
+  if [ "${ALLOW_TRIP_POINT_MOD:-0}" = "1" ] && [ "$is_mt6877" = "1" ] && [ -f "$TP_ENC" ]; then
+    cp -f "$TP_ENC" "$MODDIR/system/vendor/etc/.tp/thermal.conf" 2>/dev/null
+    chcon u:object_r:vendor_configs_file:s0 "$MODDIR/system/vendor/etc/.tp/thermal.conf" 2>/dev/null
+    if [ -w "/vendor/etc/.tp/thermal.conf" ] || [ -d "/vendor/etc/.tp" ]; then
+      cp -f "$TP_ENC" /vendor/etc/.tp/thermal.conf 2>/dev/null
+      chcon u:object_r:vendor_configs_file:s0 /vendor/etc/.tp/thermal.conf 2>/dev/null
+    fi
+    if [ -x "/vendor/bin/thermal_manager" ]; then
+      /vendor/bin/thermal_manager /vendor/etc/.tp/thermal.conf >/dev/null 2>&1
+    fi
+    log_msg "Applied MT6877 .tp thermal profile '$target_prof' (ALLOW_TRIP_POINT_MOD=1)"
+  fi
+
+  if [ -f "$TP_TXT" ] && [ -d "/proc/driver/thermal" ]; then
+    inject_plaintext_to_proc "$TP_TXT"
+    log_msg "Applied thermal cooler rules for '$target_prof' (ALLOW_TRIP_POINT_MOD=${ALLOW_TRIP_POINT_MOD:-0})"
+  fi
+
+  if [ -f "/proc/ppm/enabled" ]; then
+    echo 1 > /proc/ppm/enabled 2>/dev/null
+    if [ "$target_prof" = "performance" ] || [ "$target_prof" = "gaming" ]; then
+      echo "0 0" > /proc/ppm/policy_status 2>/dev/null
+      echo "4 0" > /proc/ppm/policy_status 2>/dev/null
+    else
+      echo "4 1" > /proc/ppm/policy_status 2>/dev/null
+    fi
+  fi
+
+  if [ "$FPSGO_UNLOCK" = "1" ]; then
+    case "$target_prof" in
+      gaming)
+        [ -f /sys/kernel/fpsgo/fbt/thrm_temp_th ] && echo 85000 > /sys/kernel/fpsgo/fbt/thrm_temp_th 2>/dev/null
+        [ -f /sys/kernel/fpsgo/fbt/thrm_limit_cpu ] && echo 0 > /sys/kernel/fpsgo/fbt/thrm_limit_cpu 2>/dev/null
+        ;;
+      performance)
+        [ -f /sys/kernel/fpsgo/fbt/thrm_temp_th ] && echo 82000 > /sys/kernel/fpsgo/fbt/thrm_temp_th 2>/dev/null
+        [ -f /sys/kernel/fpsgo/fbt/thrm_limit_cpu ] && echo 0 > /sys/kernel/fpsgo/fbt/thrm_limit_cpu 2>/dev/null
+        ;;
+      balanced)
+        [ -f /sys/kernel/fpsgo/fbt/thrm_temp_th ] && echo 78000 > /sys/kernel/fpsgo/fbt/thrm_temp_th 2>/dev/null
+        [ -f /sys/kernel/eara_thermal/enable ] && echo 1 > /sys/kernel/eara_thermal/enable 2>/dev/null
+        ;;
+      powersave)
+        [ -f /sys/kernel/fpsgo/fbt/thrm_temp_th ] && echo 70000 > /sys/kernel/fpsgo/fbt/thrm_temp_th 2>/dev/null
+        [ -f /sys/kernel/eara_thermal/enable ] && echo 1 > /sys/kernel/eara_thermal/enable 2>/dev/null
+        ;;
+    esac
+  fi
+
+  if [ "$GED_BOOST" = "1" ] && [ -d "/sys/module/ged/parameters" ]; then
+    case "$target_prof" in
+      gaming)
+        echo 1 > /sys/module/ged/parameters/gx_game_mode 2>/dev/null
+        echo 1 > /sys/module/ged/parameters/ged_boost_enable 2>/dev/null
+        echo 1 > /sys/module/ged/parameters/enable_gpu_boost 2>/dev/null
+        ;;
+      performance)
+        echo 0 > /sys/module/ged/parameters/gx_game_mode 2>/dev/null
+        echo 1 > /sys/module/ged/parameters/ged_boost_enable 2>/dev/null
+        echo 1 > /sys/module/ged/parameters/enable_gpu_boost 2>/dev/null
+        ;;
+      *)
+        echo 0 > /sys/module/ged/parameters/gx_game_mode 2>/dev/null
+        echo 0 > /sys/module/ged/parameters/ged_boost_enable 2>/dev/null
+        ;;
+    esac
+  fi
+
+  if [ -f "/sys/class/thermal/thermal_message/sconfig" ]; then
+    case "$target_prof" in
+      gaming|performance) echo 10 > /sys/class/thermal/thermal_message/sconfig 2>/dev/null ;;
+      balanced)           echo 0 > /sys/class/thermal/thermal_message/sconfig 2>/dev/null ;;
+      powersave)          echo 1 > /sys/class/thermal/thermal_message/sconfig 2>/dev/null ;;
+    esac
+  fi
+}
+
+restore_stock_thermal() {
+  if [ -f "$PERSIST_DIR/backup/.backed_up" ] && [ -f "$PERSIST_DIR/backup/thermal.conf" ]; then
+    cp -f "$PERSIST_DIR/backup/thermal.conf" "$MODDIR/system/vendor/etc/.tp/thermal.conf" 2>/dev/null
+    [ -d "/vendor/etc/.tp" ] && cp -af "$PERSIST_DIR/backup/"* /vendor/etc/.tp/ 2>/dev/null
+    [ -x "/vendor/bin/thermal_manager" ] && /vendor/bin/thermal_manager /vendor/etc/.tp/thermal.conf >/dev/null 2>&1
+    log_msg "Restored verified stock /vendor/etc/.tp thermal configuration."
+    echo "TRANSACTION_STATUS=APPLIED"
+    echo "[OK] Stock OEM thermal configuration restored from verified backup."
+    return 0
+  else
+    log_msg "Stock /vendor/etc/.tp backup not found; applied conservative balanced fallback."
+    apply_subsystem_tuning "balanced"
+    echo "TRANSACTION_STATUS=PARTIAL"
+    echo "[WARN] Stock backup not found on this device; applied safe Balanced thermal profile."
+    return 1
+  fi
+}
+
+# Fast Zero-Fork Temperature Parser & Cached Thermal Zone Mapper
+parse_temp_decic_fast() {
+  # Sets _DECIC_OUT and _FMT_OUT without spawning any subshells
+  _pt_raw="$1"
+  _DECIC_OUT=""
+  _FMT_OUT="UNAVAILABLE"
+  # Extract first integer token if line has multiple tokens (e.g. /proc/mtktz)
+  set -- $_pt_raw
+  _tok="$1"
+  case "$_tok" in
+    ""|*[!0-9-]*)
+      # Fallback cleanup if needed
+      _tok=$(printf "%s" "$_tok" | tr -dc '0-9-')
+      ;;
+  esac
+  case "$_tok" in
+    ""|"-"|"0"|"-127000"|"-274000") return 1 ;;
+  esac
+  if [ "$_tok" -le 0 ] 2>/dev/null; then
+    return 1
+  fi
+  if [ "$_tok" -ge 1000 ] 2>/dev/null; then
+    _DECIC_OUT=$((_tok / 100))
+  elif [ "$_tok" -ge 120 ] 2>/dev/null; then
+    _DECIC_OUT="$_tok"
+  else
+    _DECIC_OUT=$((_tok * 10))
+  fi
+  if [ "$_DECIC_OUT" -le 50 ] || [ "$_DECIC_OUT" -ge 1500 ]; then
+    _DECIC_OUT=""
+    return 1
+  fi
+  _int_p=$((_DECIC_OUT / 10))
+  _dec_p=$((_DECIC_OUT % 10))
+  [ "$_dec_p" -lt 0 ] && _dec_p=$((-_dec_p))
+  _FMT_OUT="${_int_p}.${_dec_p}°C"
+  return 0
+}
+
+parse_temp_decic() {
+  if parse_temp_decic_fast "$1"; then
+    echo "$_DECIC_OUT"
+    return 0
+  fi
+  echo ""
+  return 1
+}
+
+format_decic() {
+  dc="$1"
+  if [ -z "$dc" ]; then
+    echo "UNAVAILABLE"
+    return
+  fi
+  int_p=$((dc / 10))
+  dec_p=$((dc % 10))
+  [ "$dec_p" -lt 0 ] && dec_p=$((-dec_p))
+  echo "${int_p}.${dec_p}°C"
+}
+
+TZ_MAP_CACHE="$STATE_DIR/thermal_zone_map.env"
+
+build_thermal_zone_cache() {
+  TZ_NODE_CPU=""; TZ_NAME_CPU=""
+  TZ_NODE_GPU=""; TZ_NAME_GPU=""
+  TZ_NODE_SOC=""; TZ_NAME_SOC=""
+  TZ_NODE_BAT=""; TZ_NAME_BAT=""
+  TZ_NODE_PMIC=""; TZ_NAME_PMIC=""
+  TZ_NODE_PA=""; TZ_NAME_PA=""
+  TZ_NODE_WIFI=""; TZ_NAME_WIFI=""
+
+  # Single pass over /sys/class/thermal/thermal_zone* using pure shell built-in read
+  for _tz in /sys/class/thermal/thermal_zone*; do
+    [ -f "$_tz/type" ] && [ -f "$_tz/temp" ] || continue
+    _tname=""
+    read -r _tname < "$_tz/type" 2>/dev/null || continue
+    case "$_tname" in
+      tzimgs*|*imgs*) continue ;;
+    esac
+    _traw=""
+    read -r _traw < "$_tz/temp" 2>/dev/null || continue
+    parse_temp_decic_fast "$_traw" || continue
+
+    case "$_tname" in
+      mtktscpu|cpu_therm|*cpu*|soc_max)
+        [ -z "$TZ_NODE_CPU" ] && TZ_NODE_CPU="$_tz/temp" && TZ_NAME_CPU="$_tz($_tname)" ;;
+      mtktsgpu|gpu_therm|*gpu*|gpuss*)
+        [ -z "$TZ_NODE_GPU" ] && TZ_NODE_GPU="$_tz/temp" && TZ_NAME_GPU="$_tz($_tname)" ;;
+      mtktsAP|mtktsap|soc_therm|ap_ntc|*soc*)
+        [ -z "$TZ_NODE_SOC" ] && TZ_NODE_SOC="$_tz/temp" && TZ_NAME_SOC="$_tz($_tname)" ;;
+      mtktsbattery|battery|bat_therm)
+        [ -z "$TZ_NODE_BAT" ] && TZ_NODE_BAT="$_tz/temp" && TZ_NAME_BAT="$_tz($_tname)" ;;
+      mtktspmic|*pmic*)
+        [ -z "$TZ_NODE_PMIC" ] && TZ_NODE_PMIC="$_tz/temp" && TZ_NAME_PMIC="$_tz($_tname)" ;;
+      mtktspa|mtktsbtsmdpa|mtktsbtsnrpa|pa_therm|*pa_thm*)
+        [ -z "$TZ_NODE_PA" ] && TZ_NODE_PA="$_tz/temp" && TZ_NAME_PA="$_tz($_tname)" ;;
+      mtktswmt|*wmt*|*wifi*|*wlan*)
+        [ -z "$TZ_NODE_WIFI" ] && TZ_NODE_WIFI="$_tz/temp" && TZ_NAME_WIFI="$_tz($_tname)" ;;
+    esac
+  done
+
+  # Fallback to direct /proc/mtktz or power_supply nodes if not found in sysfs
+  [ -z "$TZ_NODE_CPU" ] && [ -f "/proc/mtktz/mtktscpu" ] && TZ_NODE_CPU="/proc/mtktz/mtktscpu" && TZ_NAME_CPU="/proc/mtktz/mtktscpu"
+  [ -z "$TZ_NODE_GPU" ] && [ -f "/proc/mtktz/mtktsgpu" ] && TZ_NODE_GPU="/proc/mtktz/mtktsgpu" && TZ_NAME_GPU="/proc/mtktz/mtktsgpu"
+  [ -z "$TZ_NODE_SOC" ] && [ -f "/proc/mtktz/mtktsAP" ] && TZ_NODE_SOC="/proc/mtktz/mtktsAP" && TZ_NAME_SOC="/proc/mtktz/mtktsAP"
+  [ -z "$TZ_NODE_BAT" ] && [ -f "/sys/class/power_supply/battery/temp" ] && TZ_NODE_BAT="/sys/class/power_supply/battery/temp" && TZ_NAME_BAT="/sys/class/power_supply/battery/temp"
+  [ -z "$TZ_NODE_PMIC" ] && [ -f "/proc/mtktz/mtktspmic" ] && TZ_NODE_PMIC="/proc/mtktz/mtktspmic" && TZ_NAME_PMIC="/proc/mtktz/mtktspmic"
+  [ -z "$TZ_NODE_PA" ] && [ -f "/proc/mtktz/mtktspa" ] && TZ_NODE_PA="/proc/mtktz/mtktspa" && TZ_NAME_PA="/proc/mtktz/mtktspa"
+  [ -z "$TZ_NODE_WIFI" ] && [ -f "/proc/mtktz/mtktswmt" ] && TZ_NODE_WIFI="/proc/mtktz/mtktswmt" && TZ_NAME_WIFI="/proc/mtktz/mtktswmt"
+
+  cat << EOM > "$TZ_MAP_CACHE"
+TZ_NODE_CPU="$TZ_NODE_CPU"
+TZ_NAME_CPU="$TZ_NAME_CPU"
+TZ_NODE_GPU="$TZ_NODE_GPU"
+TZ_NAME_GPU="$TZ_NAME_GPU"
+TZ_NODE_SOC="$TZ_NODE_SOC"
+TZ_NAME_SOC="$TZ_NAME_SOC"
+TZ_NODE_BAT="$TZ_NODE_BAT"
+TZ_NAME_BAT="$TZ_NAME_BAT"
+TZ_NODE_PMIC="$TZ_NODE_PMIC"
+TZ_NAME_PMIC="$TZ_NAME_PMIC"
+TZ_NODE_PA="$TZ_NODE_PA"
+TZ_NAME_PA="$TZ_NAME_PA"
+TZ_NODE_WIFI="$TZ_NODE_WIFI"
+TZ_NAME_WIFI="$TZ_NAME_WIFI"
+EOM
+}
+
+read_cached_domain() {
+  _rc_node="$1"
+  _rc_name="$2"
+  _DOMAIN_OUT="UNAVAILABLE|0|None|UNAVAILABLE"
+  _DOMAIN_DC=0
+  if [ -n "$_rc_node" ] && [ -f "$_rc_node" ]; then
+    _raw_val=""
+    read -r _raw_val < "$_rc_node" 2>/dev/null || _raw_val=""
+    if parse_temp_decic_fast "$_raw_val"; then
+      _DOMAIN_DC="$_DECIC_OUT"
+      _DOMAIN_OUT="${_FMT_OUT}|${_DECIC_OUT}|${_rc_name}|ACTUAL"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+scan_all_thermal_zones() {
+  echo "=== DYNAMIC THERMAL ZONE INVENTORY (Active Hardware Sensors) ==="
+  found_any=0
+  skipped_dummy=0
+  for tz in /sys/class/thermal/thermal_zone*; do
+    [ -f "$tz/type" ] || continue
+    zname="${tz##*/}"
+    ztype=""; zraw=""; zpol="default"
+    read -r ztype < "$tz/type" 2>/dev/null || continue
+    read -r zraw < "$tz/temp" 2>/dev/null || zraw=""
+    if ! parse_temp_decic_fast "$zraw"; then
+      skipped_dummy=$((skipped_dummy + 1))
+      continue
+    fi
+    found_any=1
+    [ -f "$tz/policy" ] && read -r zpol < "$tz/policy" 2>/dev/null
+    echo "  • $zname [type=$ztype] : $_FMT_OUT (raw=${zraw:-N/A}, policy=${zpol:-default})"
+  done
+  [ "$skipped_dummy" -gt 0 ] && echo "  • [INFO] Filtered $skipped_dummy inactive/unconnected ISP sub-zones (tzimgs* raw=-127000)"
+  [ "$found_any" -eq 0 ] && echo "  • No active kernel thermal zones accessible."
+}
+
+show_status() {
+  load_config
+  STOCK_BK="UNAVAILABLE"
+  [ -f "$PERSIST_DIR/backup/.backed_up" ] && STOCK_BK="VERIFIED_READY"
+
+  [ ! -f "$TZ_MAP_CACHE" ] && build_thermal_zone_cache
+  . "$TZ_MAP_CACHE" 2>/dev/null
+
+  read_cached_domain "$TZ_NODE_CPU" "$TZ_NAME_CPU"; S_CPU="$_DOMAIN_OUT"; cpu_dc="$_DOMAIN_DC"
+  read_cached_domain "$TZ_NODE_GPU" "$TZ_NAME_GPU"; S_GPU="$_DOMAIN_OUT"
+  if [ "$S_GPU" = "UNAVAILABLE|0|None|UNAVAILABLE" ] && [ "$cpu_dc" -gt 0 ] 2>/dev/null; then
+    gpu_est_dc=$((cpu_dc - 20))
+    int_p=$((gpu_est_dc / 10)); dec_p=$((gpu_est_dc % 10))
+    S_GPU="${int_p}.${dec_p}°C|${gpu_est_dc}|SoC-Die-Shared(mtktscpu)|ESTIMATED"
+  fi
+  read_cached_domain "$TZ_NODE_SOC" "$TZ_NAME_SOC"; S_SOC="$_DOMAIN_OUT"
+  read_cached_domain "$TZ_NODE_BAT" "$TZ_NAME_BAT"; S_BAT="$_DOMAIN_OUT"
+  read_cached_domain "$TZ_NODE_PMIC" "$TZ_NAME_PMIC"; S_PMIC="$_DOMAIN_OUT"
+  read_cached_domain "$TZ_NODE_PA" "$TZ_NAME_PA"; S_PA="$_DOMAIN_OUT"
+  read_cached_domain "$TZ_NODE_WIFI" "$TZ_NAME_WIFI"; S_WIFI="$_DOMAIN_OUT"
+
+  echo "------------------------------------------------"
+  echo " Ocore Thermal Intelligence v6.0 (Ocore v3.2.0-NextGen) — Sensor Report"
+  echo "------------------------------------------------"
+  echo " Active Profile       : $PROFILE"
+  echo " Thermal State        : ${THERMAL_STATE:-NORMAL}"
+  echo " Stock Backup Status  : $STOCK_BK"
+  echo "------------------------------------------------"
+  echo "DOMAIN_CPU=$S_CPU"
+  echo "DOMAIN_GPU=$S_GPU"
+  echo "DOMAIN_SOC=$S_SOC"
+  echo "DOMAIN_BAT=$S_BAT"
+  echo "DOMAIN_PMIC=$S_PMIC"
+  echo "DOMAIN_PA=$S_PA"
+  echo "DOMAIN_WIFI=$S_WIFI"
+}
+
+cipher_transform() {
+  mode="$1"
+  infile="$2"
+  if [ ! -f "$infile" ]; then
+    echo "Error: File not found: $infile" >&2
+    exit 1
+  fi
+  awk -v mode="$mode" '
+  BEGIN {
+    for (i = 32; i <= 126; i++) {
+      ord[sprintf("%c", i)] = i
+    }
+  }
+  {
+    line = $0
+    out = ""
+    len = length(line)
+    for (i = 1; i <= len; i++) {
+      ch = substr(line, i, 1)
+      c = ord[ch]
+      shift = (i - 1) % 10
+      if (mode == "decrypt") {
+        val = c - shift
+        if (val < 32) val += 91
+      } else {
+        val = c + shift
+        if (val > 122) val -= 91
+      }
+      out = out sprintf("%c", val)
+    }
+    print out
+  }' "$infile"
+}
+
+cmd="$1"
+case "$cmd" in
+  status|"") show_status ;;
+  zones) scan_all_thermal_zones ;;
+  profile)
+    new_prof="$2"
+    case "$new_prof" in
+      performance|gaming|balanced|powersave)
+        save_config_key "PROFILE" "$new_prof"
+        apply_subsystem_tuning "$new_prof"
+        update_module_prop_desc "$new_prof"
+        log_msg "Switched thermal profile to: $new_prof"
+        echo "TRANSACTION_STATUS=APPLIED"
+        echo "[OK] Switched active thermal profile to: $new_prof"
+        ;;
+      *)
+        echo "TRANSACTION_STATUS=FAILED"
+        exit 1
+        ;;
+    esac
+    ;;
+  apply)
+    load_config
+    apply_subsystem_tuning "$PROFILE"
+    update_module_prop_desc "$PROFILE"
+    echo "TRANSACTION_STATUS=APPLIED"
+    echo "[OK] Applied saved thermal profile: $PROFILE"
+    ;;
+  apply_temp)
+    apply_subsystem_tuning "$2"
+    echo "TRANSACTION_STATUS=APPLIED"
+    echo "[OK] Applied thermal profile: $2"
+    ;;
+  restore_stock) restore_stock_thermal ;;
+  mode)
+    case "$2" in
+      oem_stock|stock)
+        save_config_key "THERMAL_MODE" "oem_stock"
+        save_config_key "ALLOW_TRIP_POINT_MOD" "0"
+        restore_stock_thermal
+        ;;
+      monitor_only)
+        save_config_key "THERMAL_MODE" "monitor_only"
+        save_config_key "SMART_GUARD" "0"
+        echo "TRANSACTION_STATUS=APPLIED"
+        echo "[OK] Thermal Engine set to Monitoring Only (zero kernel/cooler writes)."
+        ;;
+      ocore_intel|ocore_mtk|*)
+        save_config_key "THERMAL_MODE" "ocore_intel"
+        save_config_key "SMART_GUARD" "1"
+        load_config
+        apply_subsystem_tuning "$PROFILE"
+        echo "TRANSACTION_STATUS=APPLIED"
+        echo "[OK] Ocore Thermal Intelligence enabled (Profile: $PROFILE)."
+        ;;
+    esac
+    ;;
+  trip_policy)
+    case "$2" in
+      on|1)  save_config_key "ALLOW_TRIP_POINT_MOD" "1"; echo "TRANSACTION_STATUS=APPLIED"; echo "[OK] Custom MT6877 trip-point table modification ENABLED." ;;
+      off|0) save_config_key "ALLOW_TRIP_POINT_MOD" "0"; restore_stock_thermal >/dev/null 2>&1; echo "TRANSACTION_STATUS=APPLIED"; echo "[OK] Stock hardware trip points PRESERVED (Safe Default)." ;;
+    esac
+    ;;
+  guard)
+    case "$2" in
+      on|1)  save_config_key "SMART_GUARD" "1"; echo "TRANSACTION_STATUS=APPLIED"; echo "[OK] Ocore Multi-Domain Thermal Guard enabled." ;;
+      off|0) save_config_key "SMART_GUARD" "0"; echo "TRANSACTION_STATUS=APPLIED"; echo "[OK] Ocore Multi-Domain Thermal Guard disabled." ;;
+    esac
+    ;;
+  fpsgo)
+    case "$2" in
+      on|1)  save_config_key "FPSGO_UNLOCK" "1"; "$0" apply >/dev/null; echo "TRANSACTION_STATUS=APPLIED"; echo "[OK] FPSGO Thermal Ceiling tuning enabled." ;;
+      off|0) save_config_key "FPSGO_UNLOCK" "0"; "$0" apply >/dev/null; echo "TRANSACTION_STATUS=APPLIED"; echo "[OK] FPSGO Thermal Ceiling tuning disabled." ;;
+    esac
+    ;;
+  ged)
+    case "$2" in
+      on|1)  save_config_key "GED_BOOST" "1"; "$0" apply >/dev/null; echo "TRANSACTION_STATUS=APPLIED"; echo "[OK] GED GPU Boost enabled." ;;
+      off|0) save_config_key "GED_BOOST" "0"; "$0" apply >/dev/null; echo "TRANSACTION_STATUS=APPLIED"; echo "[OK] GED GPU Boost disabled." ;;
+    esac
+    ;;
+  decrypt) cipher_transform "decrypt" "$2" ;;
+  encrypt) cipher_transform "encrypt" "$2" ;;
+  log) [ -f "$LOG_FILE" ] && tail -n 50 "$LOG_FILE" || echo "No thermal logs yet." ;;
+esac

@@ -1,0 +1,9 @@
+io.github.a13e300.ksuwebui
+io.github.huskydg.magisk
+com.topjohnwu.magisk
+me.weishu.kernelsu
+com.sukisu.ultra
+com.rifsxd.ksunext
+com.termux
+com.ocore.booster
+com.openfg.companion

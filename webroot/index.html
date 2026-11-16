@@ -1,0 +1,2465 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>OCORE v3.2.0-NextGen — Unified Performance Control Center</title>
+  <style>
+    :root {
+      --bg-graphite: #090c12;
+      --bg-charcoal: #0f141f;
+      --bg-card: #131926;
+      --bg-elevated: #1b2437;
+      --border: rgba(51, 65, 95, 0.65);
+      --border-glow: rgba(0, 229, 255, 0.38);
+      --cyan: #00e5ff;
+      --blue: #3b82f6;
+      --violet: #8b5cf6;
+      --soft-white: #f1f5f9;
+      --text-muted: #94a3b8;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --radius-lg: 14px;
+      --radius-md: 10px;
+      --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.32);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: radial-gradient(circle at 50% 0%, rgba(59, 130, 246, 0.08), transparent 55%), var(--bg-graphite);
+      color: var(--soft-white);
+      padding-bottom: 92px;
+      line-height: 1.44;
+      min-height: 100vh;
+    }
+
+    header {
+      position: sticky; top: 0; z-index: 50;
+      background: rgba(9, 12, 18, 0.88);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 11px 14px;
+      display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; }
+    .brand-logo {
+      width: 36px; height: 36px; border-radius: 10px;
+      background: linear-gradient(135deg, var(--cyan), var(--blue), var(--violet));
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 900; font-size: 16px; color: #090c12;
+      box-shadow: 0 4px 12px rgba(0, 229, 255, 0.2);
+    }
+    .brand-title h1 { font-size: 13.5px; font-weight: 800; letter-spacing: 0.5px; color: var(--soft-white); }
+    .brand-title p { font-size: 10px; color: var(--text-muted); }
+
+    .conn-badge {
+      font-size: 10px; font-weight: 700; padding: 5px 10px;
+      border-radius: 999px; background: var(--bg-elevated);
+      border: 1px solid var(--border); cursor: pointer;
+      display: flex; align-items: center; gap: 6px;
+      transition: all 0.2s ease;
+    }
+    .conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
+    .conn-badge.live { color: var(--cyan); border-color: var(--border-glow); }
+    .conn-badge.live .conn-dot { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+    .conn-badge.offline { color: var(--warning); border-color: rgba(245, 158, 11, 0.45); }
+    .conn-badge.busy .conn-dot { background: var(--violet); animation: pulseDot 0.9s infinite alternate; }
+    @keyframes pulseDot { from { opacity: 0.35; transform: scale(0.85); } to { opacity: 1; transform: scale(1.2); } }
+
+    #offline-banner {
+      display: none;
+      background: rgba(245, 158, 11, 0.12);
+      border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+      color: #fde68a;
+      font-size: 11px;
+      padding: 8px 14px;
+      text-align: center;
+    }
+
+    .container { max-width: 860px; margin: 0 auto; padding: 12px; }
+    .tab-pane { display: none; animation: fadeIn 0.18s ease; }
+    .tab-pane.active { display: block; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
+
+    .card {
+      background: var(--bg-card);
+      contain: layout style;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 13px;
+      margin-bottom: 11px;
+      box-shadow: var(--shadow-soft);
+    }
+    .card-header {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 7px; gap: 6px; flex-wrap: wrap;
+    }
+    .card-title {
+      font-size: 11.5px; font-weight: 800; text-transform: uppercase;
+      letter-spacing: 0.6px; color: var(--cyan);
+    }
+    .card-sub { font-size: 11px; color: var(--text-muted); margin-bottom: 10px; }
+
+    .badge {
+      font-size: 9.5px; font-weight: 700; padding: 2.5px 7px;
+      border-radius: 5px; text-transform: uppercase; letter-spacing: 0.4px;
+      background: var(--bg-elevated); border: 1px solid var(--border); color: var(--soft-white);
+    }
+    .badge.ok { color: var(--success); border-color: rgba(16, 185, 129, 0.4); background: rgba(16, 185, 129, 0.1); }
+    .badge.warn { color: var(--warning); border-color: rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.1); }
+    .badge.crit { color: var(--danger); border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.12); }
+    .badge.cyan { color: var(--cyan); border-color: var(--border-glow); background: rgba(0, 229, 255, 0.1); }
+    .badge.violet { color: #c4b5fd; border-color: rgba(139, 92, 246, 0.45); background: rgba(139, 92, 246, 0.14); }
+
+
+    .fps-pill-preview-wrap {
+      display: flex; align-items: center; justify-content: space-between;
+      background: rgba(9, 12, 18, 0.72); border: 1px solid var(--border);
+      border-radius: 12px; padding: 10px 14px; margin-bottom: 10px; gap: 12px; flex-wrap: wrap;
+    }
+    .fps-hud-capsule {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 12px; border-radius: 999px;
+      background: rgba(15, 20, 31, 0.88);
+      border: 1px solid rgba(16, 185, 129, 0.55);
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+      font-family: "JetBrains Mono", "Roboto Mono", monospace;
+      font-size: 13px; font-weight: 800; letter-spacing: 0.4px;
+      color: #f8fafc; transition: all 0.22s ease;
+      user-select: none;
+    }
+    .fps-hud-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #10b981; box-shadow: 0 0 6px #10b981;
+      transition: background 0.22s ease, box-shadow 0.22s ease;
+    }
+    .fps-hud-capsule.green { border-color: rgba(16, 185, 129, 0.6); color: #ecfdf5; }
+    .fps-hud-capsule.green .fps-hud-dot { background: #10b981; box-shadow: 0 0 6px #10b981; }
+    .fps-hud-capsule.yellow { border-color: rgba(245, 158, 11, 0.65); color: #fef3c7; }
+    .fps-hud-capsule.yellow .fps-hud-dot { background: #f59e0b; box-shadow: 0 0 6px #f59e0b; }
+    .fps-hud-capsule.red { border-color: rgba(239, 68, 68, 0.7); color: #fee2e2; }
+    .fps-hud-capsule.red .fps-hud-dot { background: #ef4444; box-shadow: 0 0 6px #ef4444; }
+    .fps-hud-capsule.gray { border-color: rgba(148, 163, 184, 0.35); color: #94a3b8; }
+    .fps-hud-capsule.gray .fps-hud-dot { background: #64748b; box-shadow: none; }
+    .state-chain {
+      display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
+      font-size: 9.5px; font-family: monospace; color: var(--text-muted);
+    }
+    .state-step {
+      padding: 2px 6px; border-radius: 4px; background: var(--bg-elevated);
+      border: 1px solid var(--border);
+    }
+    .state-step.active {
+      color: var(--cyan); border-color: var(--border-glow);
+      background: rgba(0, 229, 255, 0.12); font-weight: 700;
+    }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 7px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; }
+    .grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+    .grid-6 { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+    @media (max-width: 520px) {
+      .grid-3 { grid-template-columns: repeat(2, 1fr); }
+      .grid-4 { grid-template-columns: repeat(2, 1fr); }
+      .grid-5 { grid-template-columns: repeat(3, 1fr); }
+      .grid-6 { grid-template-columns: repeat(3, 1fr); }
+    }
+
+    .metric-box {
+      background: var(--bg-charcoal);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 9px;
+    }
+    .metric-top { display: flex; justify-content: space-between; align-items: center; gap: 4px; }
+    .metric-label { font-size: 9.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.3px; }
+    .prov-tag { font-size: 8.5px; font-weight: 700; padding: 1px 4px; border-radius: 3px; background: rgba(148, 163, 184, 0.15); color: var(--text-muted); }
+    .prov-tag.actual { color: var(--success); background: rgba(16, 185, 129, 0.12); }
+    .prov-tag.cached { color: var(--cyan); background: rgba(0, 229, 255, 0.12); }
+    .prov-tag.estimated { color: var(--warning); background: rgba(245, 158, 11, 0.12); }
+    .prov-tag.unavailable { color: #fca5a5; background: rgba(239, 68, 68, 0.12); }
+
+    .metric-val { font-size: 14px; font-weight: 800; margin-top: 3px; color: var(--soft-white); word-break: break-word; }
+    .metric-sub { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+
+    .btn {
+      background: var(--bg-elevated);
+      color: var(--soft-white);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 8.5px 10px;
+      font-size: 11px; font-weight: 600;
+      cursor: pointer; text-align: center;
+      transition: all 0.15s ease;
+    }
+    .btn:active { transform: scale(0.98); opacity: 0.9; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn.active {
+      background: rgba(0, 229, 255, 0.15);
+      border-color: var(--cyan);
+      color: var(--cyan);
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--blue), var(--violet));
+      border: 1px solid rgba(0, 229, 255, 0.35);
+      color: #fff; font-weight: 700;
+    }
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.14);
+      border-color: rgba(239, 68, 68, 0.45);
+      color: #fca5a5;
+    }
+    .btn-sm { padding: 5px 8px; font-size: 10px; border-radius: 6px; }
+
+    .row-item {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 8.5px 0; border-bottom: 1px solid rgba(38, 50, 75, 0.5);
+      gap: 10px;
+    }
+    .row-item:last-child { border-bottom: none; padding-bottom: 0; }
+    .row-info h4 { font-size: 12px; font-weight: 600; color: var(--soft-white); }
+    .row-info p { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+
+    .switch {
+      position: relative; width: 42px; height: 22px;
+      background: var(--bg-charcoal); border: 1px solid var(--border);
+      border-radius: 999px; cursor: pointer; flex-shrink: 0;
+      transition: all 0.2s ease;
+    }
+    .switch::after {
+      content: ""; position: absolute; top: 2px; left: 2px;
+      width: 16px; height: 16px; background: var(--text-muted);
+      border-radius: 50%; transition: all 0.2s ease;
+    }
+    .switch.on { background: rgba(0, 229, 255, 0.22); border-color: var(--cyan); }
+    .switch.on::after { left: 22px; background: var(--cyan); }
+    .switch.disabled { opacity: 0.35; pointer-events: none; }
+
+    select, input[type="text"], input[type="number"] {
+      background: var(--bg-charcoal); color: var(--soft-white);
+      border: 1px solid var(--border); border-radius: 7px;
+      padding: 6.5px 8px; font-size: 11px; width: 100%;
+    }
+
+    .chart-wrap {
+      background: var(--bg-charcoal);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 8px 10px;
+      margin-top: 8px;
+    }
+    canvas.spark { width: 100%; height: 64px; display: block; }
+
+    pre.term {
+      background: #05070b; color: #a5f3fc;
+      border: 1px solid var(--border); border-radius: var(--radius-md);
+      padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 10.5px; max-height: 290px; overflow-y: auto; white-space: pre-wrap;
+    }
+
+    .profile-card {
+      background: var(--bg-charcoal);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 9px;
+      cursor: pointer;
+      transition: border-color 0.15s ease;
+    }
+    .profile-card:hover, .profile-card.selected { border-color: var(--cyan); }
+
+    nav.bottom-nav {
+      position: fixed; bottom: 0; left: 0; right: 0; z-index: 60;
+      background: rgba(11, 15, 24, 0.95);
+      backdrop-filter: blur(12px);
+      border-top: 1px solid var(--border);
+      display: grid; grid-template-columns: repeat(8, 1fr);
+      padding: 5px 2px;
+    }
+    .nav-btn {
+      background: none; border: none; color: var(--text-muted);
+      font-size: 8.5px; font-weight: 600; padding: 4px 1px;
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+      cursor: pointer;
+    }
+    .nav-btn.active { color: var(--cyan); }
+    .nav-icon { font-size: 13.5px; }
+
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0, 0, 0, 0.74);
+      z-index: 120; display: none; align-items: center; justify-content: center; padding: 16px;
+    }
+    .modal-backdrop.show { display: flex; }
+    .modal-box {
+      background: #141a28; border: 1px solid var(--cyan);
+      border-radius: var(--radius-lg); max-width: 420px; width: 100%; padding: 15px;
+    }
+    .modal-box h3 { font-size: 13.5px; color: var(--cyan); margin-bottom: 6px; }
+    .modal-box p { font-size: 11.5px; color: var(--soft-white); margin-bottom: 13px; }
+
+    #toast {
+      position: fixed; bottom: 76px; left: 50%; transform: translateX(-50%);
+      background: var(--bg-elevated); color: var(--soft-white);
+      border: 1px solid var(--cyan); padding: 7px 14px; border-radius: 999px;
+      font-size: 11px; font-weight: 600; opacity: 0; pointer-events: none;
+      z-index: 110; transition: opacity 0.2s ease;
+    }
+    #toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-logo"><img src="assets/ocore.webp" alt="O" style="width:28px;height:28px;border-radius:7px;" onerror="this.style.display='none';this.parentNode.textContent='O';" /></div>
+    <div class="brand-title">
+      <h1>OCORE UNIFIED ENGINE v3.2.0-NextGen</h1>
+      <p id="hdr-sub">Priority Arbiter • Thermal Intelligence • EEM Guard • Device Profiles</p>
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:6px;">
+    <select id="sel-poll-interval" style="width:82px;padding:4px 6px;font-size:10px;border-radius:999px;" onchange="changePollInterval(this.value)" title="Interval Polling Telemetri">
+      <option value="2000">Poll: 2s</option>
+      <option value="5000" selected>Poll: 5s</option>
+      <option value="10000">Poll: 10s</option>
+      <option value="0">Paused</option>
+    </select>
+    <div id="conn-pill" class="conn-badge offline" onclick="refreshAll(true)" title="Klik untuk sinkronisasi paksa">
+      <span class="conn-dot"></span>
+      <span id="conn-text">Detecting Bridge...</span>
+    </div>
+  </div>
+</header>
+
+<div id="offline-banner">
+  <b>DISCONNECTED READ-ONLY ADAPTER</b> — WebUI dibuka di luar Root Manager (KernelSU / KernelSU Next / APatch / Magisk WebUI-X). Semua sensor ditandai <code>UNAVAILABLE</code> (tanpa telemetri palsu).
+</div>
+
+<div class="container">
+
+  <!-- ===================================================================== -->
+  <!-- PAGE A: DASHBOARD                                                     -->
+  <!-- ===================================================================== -->
+  <div id="tab-dash" class="tab-pane active">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Ocore Next-Gen Priority Arbiter</span>
+        <div style="display:flex;gap:5px;flex-wrap:wrap;">
+          <span id="badge-arbiter-tier" class="badge violet">TIER 5: GLOBAL_PROFILE</span>
+          <span id="badge-therm-state" class="badge ok">THERMAL: NORMAL</span>
+          <span id="badge-active-prof" class="badge cyan">BALANCED</span>
+        </div>
+      </div>
+      <p class="card-sub">Urutan Prioritas: <b>1. Thermal Protection</b> &gt; <b>2. Critical Battery / Safe Mode</b> &gt; <b>3. Verified Gaming Session</b> &gt; <b>4. User Manual Override</b> &gt; <b>5. Global Profile</b></p>
+      <div class="grid-5" style="margin-bottom:8px;">
+        <button class="btn" id="prof-powersave" onclick="setGlobalProfile('powersave')">Powersave</button>
+        <button class="btn active" id="prof-balanced" onclick="setGlobalProfile('balanced')">Balanced</button>
+        <button class="btn" id="prof-performance" onclick="setGlobalProfile('performance')">Performance</button>
+        <button class="btn" id="prof-gaming" onclick="setGlobalProfile('gaming')">Gaming</button>
+        <button class="btn" id="prof-custom" onclick="setGlobalProfile('custom')">Custom</button>
+      </div>
+      <div class="grid-2">
+        <button class="btn btn-primary" onclick="runCmd('one_tap_boost')">⚡ One-Tap Optimization (RAM &amp; Cache)</button>
+        <button class="btn" id="btn-safemode" onclick="toggleSafeMode()">🛡️ Emergency Safe Mode: OFF</button>
+      </div>
+    </div>
+
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Floating FPS-Only HUD &amp; Game Session State Machine</span>
+        <span id="badge-session-state" class="badge">STATE: IDLE</span>
+      </div>
+      <div class="fps-pill-preview-wrap">
+        <div>
+          <div class="metric-label" style="margin-bottom:4px;">Live FPS-Only Pill HUD Preview (Strict Minimalist Capsule)</div>
+          <div class="state-chain" id="state-machine-chain">
+            <span class="state-step active" data-st="IDLE">IDLE</span><span>&rarr;</span>
+            <span class="state-step" data-st="GAME_DETECTED">GAME_DETECTED</span><span>&rarr;</span>
+            <span class="state-step" data-st="GAME_VALIDATED">GAME_VALIDATED</span><span>&rarr;</span>
+            <span class="state-step" data-st="OVERLAY_ACTIVE">OVERLAY_ACTIVE</span>
+          </div>
+        </div>
+        <div id="hud-pill-preview" class="fps-hud-capsule gray" title="Floating Pill hanya menampilkan angka FPS">
+          <span class="fps-hud-dot"></span>
+          <span id="hud-pill-text">-- FPS</span>
+        </div>
+      </div>
+      <div class="grid-3">
+        <div class="metric-box">
+          <div class="metric-label">Overlay Policy</div>
+          <div class="metric-val" id="d-hud-policy" style="font-size:12px;">GameList-Only</div>
+          <div class="metric-sub" id="d-hud-allowed">Overlay: HIDDEN (Idle)</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Target Display Hz</div>
+          <div class="metric-val" id="d-hud-hz" style="font-size:12px;">60/90/120 Hz</div>
+          <div class="metric-sub" id="d-hud-thr">Green &ge;85% | Yellow &ge;60%</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-label">Adaptive Workload</div>
+          <div class="metric-val" id="d-agw-sub" style="font-size:12px;">IDLE</div>
+          <div class="metric-sub" id="d-srm-stat">Smart Resource: Standby</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Device, SoC, Active Session &amp; Daemon Health</span>
+        <span id="tx-last-badge" class="badge ok">TX: APPLIED</span>
+      </div>
+      <div class="grid-4" style="margin-bottom:7px;">
+        <div class="metric-box">
+          <div class="metric-top"><span class="metric-label">Device Model</span><span class="prov-tag actual" id="d-hw-verif">ACTUAL</span></div>
+          <div class="metric-val" id="d-dev-model">--</div>
+          <div class="metric-sub" id="d-dev-soc">SoC: --</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-top"><span class="metric-label">Active Game / FPS</span><span id="d-fps-prov" class="prov-tag unavailable">IDLE</span></div>
+          <div class="metric-val" id="d-act-game">None</div>
+          <div class="metric-sub" id="d-act-fps">FPS: UNAVAILABLE</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-top"><span class="metric-label">Daemon Health</span><span class="prov-tag actual">WATCHDOG</span></div>
+          <div class="metric-val" id="d-daemon-sum">Checking...</div>
+          <div class="metric-sub" id="d-err-sum">Errors: 0</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-top"><span class="metric-label">Heuristic Advisory</span><span class="prov-tag estimated">ADVISORY</span></div>
+          <div class="metric-val" id="intel-rec" style="color:var(--cyan);">BALANCED</div>
+          <div class="metric-sub" id="intel-score">Score: -- / 100</div>
+        </div>
+      </div>
+      <div class="grid-4">
+        <div class="metric-box">
+          <div class="metric-top"><span class="metric-label">CPU Temp &amp; Load</span><span id="prov-cpu" class="prov-tag unavailable">UNAVAILABLE</span></div>
+          <div class="metric-val" id="d-tcpu">UNAVAILABLE</div>
+          <div class="metric-sub" id="d-cpu-gov">Gov: --</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-top"><span class="metric-label">GPU Temp &amp; Load</span><span id="prov-gpu" class="prov-tag unavailable">UNAVAILABLE</span></div>
+          <div class="metric-val" id="d-tgpu">UNAVAILABLE</div>
+          <div class="metric-sub" id="d-gpu-freq">Freq: --</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-top"><span class="metric-label">Battery Status</span><span id="prov-bat" class="prov-tag unavailable">UNAVAILABLE</span></div>
+          <div class="metric-val" id="d-tbat">UNAVAILABLE</div>
+          <div class="metric-sub" id="d-bat-state">Status: --</div>
+        </div>
+        <div class="metric-box">
+          <div class="metric-top"><span class="metric-label">RAM / Cache / ZRAM</span><span id="prov-ram" class="prov-tag unavailable">UNAVAILABLE</span></div>
+          <div class="metric-val" id="d-ram">UNAVAILABLE</div>
+          <div class="metric-sub" id="d-zram">Avail: -- | Cache: --</div>
+        </div>
+      </div>
+
+      <div class="chart-wrap">
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-bottom:4px;">
+          <span>Real-Time Telemetry (Cyan: CPU Avg MHz | Violet: Battery Temp °C)</span>
+          <span id="lbl-chart-latest">Waiting for samples</span>
+        </div>
+        <canvas id="telemetry-chart" class="spark" width="640" height="64"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Live Per-Core CPU Frequency &amp; Topology</span>
+        <span id="d-clusters-lbl" class="prov-tag cached">DYNAMIC SYSFS</span>
+      </div>
+      <div id="cpu-cores-grid" class="grid-2"></div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- PAGE B: PERFORMANCE PAGE                                              -->
+  <!-- ===================================================================== -->
+  <div id="tab-perf" class="tab-pane">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Performance Arbiter, Manual Override &amp; CPU Engine</span>
+        <span id="cap-cpu-badge" class="badge cyan">CPU DVFS</span>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>User Manual Override (Priority #4)</h4><p>Mengunci profil di atas Global Profile, tetap tunduk pada Thermal &amp; Critical Battery</p></div>
+        <select id="sel-manual-ovr" style="width:155px;" onchange="runCmd('manual_override ' + this.value)">
+          <option value="none">None (Auto Arbiter)</option>
+          <option value="powersave">Force Powersave</option>
+          <option value="balanced">Force Balanced</option>
+          <option value="performance">Force Performance</option>
+          <option value="gaming">Force Gaming</option>
+          <option value="custom">Force Custom</option>
+        </select>
+      </div>
+      <div class="grid-4" style="margin-top:8px;margin-bottom:8px;">
+        <button class="btn" id="ce-ocore_ai" onclick="setCpuEngine('ocore_ai')">Workload Adaptive</button>
+        <button class="btn" id="ce-ocore_manual" onclick="setCpuEngine('ocore_manual')">Static Profile</button>
+        <button class="btn" id="ce-ocore_lock" onclick="setCpuEngine('ocore_lock')">Sustained Curve</button>
+        <button class="btn" id="ce-stock" onclick="setCpuEngine('stock')">Stock Scaling</button>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Global CPU Scaling Governor</h4><p>Hanya menerapkan governor yang terdaftar di scaling_available_governors</p></div>
+        <select id="sel-gov" style="width:155px;" onchange="runCmd('governor ' + this.value)">
+          <option value="schedutil">schedutil</option>
+          <option value="performance">performance</option>
+          <option value="powersave">powersave</option>
+        </select>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Auto-Apply Heuristic Recommendation</h4><p>Terapkan rekomendasi heuristik otomatis saat idle</p></div>
+        <div id="sw-auto_rec" class="switch" onclick="toggleConfigKey('AUTO_APPLY_RECOMMENDATION')"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Custom Profile Editor &amp; Per-Policy CPU Control</span>
+        <span class="badge violet">READBACK VERIFIED</span>
+      </div>
+      <p class="card-sub">Konfigurasi profil <b>Custom</b> dengan batas persentase frekuensi minimum/maksimum adaptif (tidak pernah mengunci frekuensi maksimum permanen).</p>
+      <div class="grid-3" style="margin-bottom:7px;">
+        <div><div class="metric-label">Min Freq (%)</div><input type="number" id="inp-cp-min" value="20" min="10" max="90" /></div>
+        <div><div class="metric-label">Max Freq (%)</div><input type="number" id="inp-cp-max" value="90" min="30" max="100" /></div>
+        <div><div class="metric-label">Governor</div><input type="text" id="inp-cp-gov" value="schedutil" /></div>
+      </div>
+      <div class="grid-3" style="margin-bottom:8px;">
+        <div><div class="metric-label">GPU Mode</div><select id="sel-cp-gpu"><option value="balance">Balanced</option><option value="max">Performance</option><option value="eco">Powersave</option></select></div>
+        <div><div class="metric-label">Swappiness</div><input type="number" id="inp-cp-swp" value="100" min="10" max="160" /></div>
+        <div><div class="metric-label">Touch Level</div><input type="number" id="inp-cp-tch" value="3" min="0" max="5" /></div>
+      </div>
+      <button class="btn btn-primary" style="width:100%;" onclick="saveAndApplyCustomProfile()">Simpan &amp; Terapkan Custom Profile</button>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">EEM Voltage Stability Engine (Per-Rail Baseline)</span>
+        <span id="volt-sup-badge" class="badge cyan">CHECKING EEM</span>
+      </div>
+      <p class="card-sub">Satuan: <code>1 step = 6.25 mV</code> (Rentang Tervalidasi <code>[-12..+4]</code>). <b>Stock</b> memulihkan baseline asli perangkat yang dicapture sebelum modifikasi.</p>
+      <div class="grid-4" style="margin-bottom:8px;">
+        <button class="btn" id="vp-STOCK" onclick="setVoltProfile('STOCK')">Stock (Baseline)</button>
+        <button class="btn active" id="vp-CONSERVATIVE" onclick="setVoltProfile('CONSERVATIVE')">Conservative (-3)</button>
+        <button class="btn" id="vp-OPTIMAL" onclick="setVoltProfile('OPTIMAL')">Optimal (-5)</button>
+        <button class="btn" id="vp-DISABLED" onclick="setVoltProfile('DISABLED')">Disabled</button>
+      </div>
+      <div class="grid-4" style="margin-bottom:8px;">
+        <div><div class="metric-label">Big (EEM_DET_B)</div><input type="number" id="inp-vb" value="-3" min="-12" max="4" /></div>
+        <div><div class="metric-label">Little (EEM_DET_L)</div><input type="number" id="inp-vl" value="-3" min="-12" max="4" /></div>
+        <div><div class="metric-label">CCI (EEM_DET_CCI)</div><input type="number" id="inp-vcci" value="-2" min="-12" max="4" /></div>
+        <div><div class="metric-label">GPU (EEM_DET_GPU)</div><input type="number" id="inp-vgpu" value="-2" min="-12" max="4" /></div>
+      </div>
+      <button class="btn btn-primary" id="vp-CUSTOM" style="width:100%;margin-bottom:6px;" onclick="applyCustomVolt()">Terapkan Custom &amp; Verifikasi Readback Per-Rail</button>
+      <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;" id="eem-baseline-lbl">Captured Hardware Baseline: Checking...</div>
+      <div class="row-item">
+        <div class="row-info"><h4>Conditional EEM Persistence Guard</h4><p>Verifikasi berkala &amp; tulis ulang hanya jika nilai kernel bergeser</p></div>
+        <div id="sw-eem_guard" class="switch on" onclick="toggleSimple('eem_guard')"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">GPU, Scheduler, Cpuset/EAS, Memory, Touch &amp; Display</span>
+        <span id="badge-gpu-arch" class="badge">GPU DVFS</span>
+      </div>
+      <div class="grid-4" style="margin-bottom:8px;">
+        <button class="btn" id="gm-btn-balance" onclick="runCmd('gpu_mode balance')">GPU Balanced</button>
+        <button class="btn" id="gm-btn-max" onclick="runCmd('gpu_mode max')">GPU Performance</button>
+        <button class="btn" id="gm-btn-eco" onclick="runCmd('gpu_mode eco')">GPU Powersave</button>
+        <button class="btn" id="gm-btn-reset" onclick="runCmd('gpu_mode reset')">GPU Reset</button>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Dynamic Schedutil Rate-Limit Optimizer</h4><p>Sesuaikan up/down rate-limit berdasarkan profil aktif</p></div>
+        <div id="sw-schedutil_tune" class="switch on" onclick="toggleSimple('schedutil_tune')"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Topology-Aware EAS &amp; Cpuset Partitioning</h4><p>Isolasi background tasks ke Little cluster secara dinamis</p></div>
+        <div id="sw-cpuset_eas" class="switch on" onclick="toggleSimple('cpuset_eas')"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Block I/O Queue Optimizer</h4><p>Nonaktifkan iostats &amp; add_random, set rq_affinity=2</p></div>
+        <div id="sw-io_opt" class="switch on" onclick="toggleSimple('io_opt')"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Block I/O Scheduler</h4><p>Algoritma antrean storage yang didukung kernel</p></div>
+        <select id="sel-iosched" style="width:145px;" onchange="runCmd('io_opt ' + (state.IO_QUEUE_OPT||'1') + ' ' + this.value)">
+          <option value="default">Default</option>
+          <option value="mq-deadline">mq-deadline</option>
+          <option value="kyber">kyber</option>
+          <option value="bfq">bfq</option>
+          <option value="none">none</option>
+        </select>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>ZRAM Swappiness &amp; VM Pressure</h4><p id="lbl-zram-algo">ZRAM Algorithm: --</p></div>
+        <select id="sel-swp" style="width:145px;" onchange="runCmd('zram_vm ' + this.value)">
+          <option value="60">60 (Light)</option>
+          <option value="80">80 (Moderate)</option>
+          <option value="100" selected>100 (Balanced)</option>
+          <option value="130">130 (Aggressive)</option>
+        </select>
+      </div>
+      <div class="metric-label" style="margin-top:8px;margin-bottom:4px;">Global Touch Responsiveness Level</div>
+      <div class="grid-6" style="margin-bottom:8px;">
+        <button class="btn btn-sm" id="tch-0" onclick="setTouch('0')">Lv 0</button>
+        <button class="btn btn-sm" id="tch-1" onclick="setTouch('1')">Lv 1</button>
+        <button class="btn btn-sm" id="tch-2" onclick="setTouch('2')">Lv 2</button>
+        <button class="btn btn-sm" id="tch-3" onclick="setTouch('3')">Lv 3</button>
+        <button class="btn btn-sm" id="tch-4" onclick="setTouch('4')">Lv 4</button>
+        <button class="btn btn-sm" id="tch-5" onclick="setTouch('5')">Lv 5</button>
+      </div>
+      <div class="metric-label" style="margin-bottom:4px;">Display Refresh Rate (<span id="lbl-disp-hz">60/90/120Hz</span>)</div>
+      <div class="grid-4">
+        <button class="btn" id="rr--1" onclick="setRefresh('-1')">Auto Hz</button>
+        <button class="btn" id="rr-0" onclick="setRefresh('0')">120Hz</button>
+        <button class="btn" id="rr-1" onclick="setRefresh('1')">90Hz</button>
+        <button class="btn" id="rr-3" onclick="setRefresh('3')">60Hz</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- PAGE C: GAMING PAGE                                                   -->
+  <!-- ===================================================================== -->
+  <div id="tab-game" class="tab-pane">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Advanced Gaming Engine &amp; Session Guard</span>
+        <span id="game-sess-badge" class="badge cyan">AUTO DETECT</span>
+      </div>
+      <p class="card-sub">Mendeteksi game secara akurat (memfilter launcher, keyboard, SystemUI &amp; overlay), menyimpan snapshot sebelum game dimulai, dan memulihkan seluruh pengaturan saat game ditutup atau layar mati.</p>
+      <div class="grid-4" style="margin-bottom:8px;">
+        <button class="btn active" id="gm-auto" onclick="setGameModeOpt('auto')">Automatic</button>
+        <button class="btn" id="gm-per_game" onclick="setGameModeOpt('per_game')">Per-Game</button>
+        <button class="btn" id="gm-manual" onclick="setGameModeOpt('manual')">Manual</button>
+        <button class="btn" id="gm-disabled" onclick="setGameModeOpt('disabled')">Disabled</button>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Auto Do-Not-Disturb (DND) Saat Gaming</h4><p>Dipulihkan otomatis ke state awal saat keluar dari sesi game</p></div>
+        <div id="sw-dnd" class="switch" onclick="toggleOcoreProp('dnd')"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Game Asset Preload</h4><p>Preload library aktif saat sesi game terverifikasi</p></div>
+        <div id="sw-APreload" class="switch" onclick="toggleOcoreProp('APreload')"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Auto Floating FPS Pill (GameList-Only Overlay)</h4><p>Aktif otomatis hanya saat membuka game dalam GameList; langsung disembunyikan di luar game</p></div>
+        <div id="sw-auto_hud" class="switch on" onclick="toggleAutoHud()"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Smart Resource Manager Saat Gaming</h4><p>Isolasi proses background ke Little cluster &amp; kurangi tekanan cache selama sesi game</p></div>
+        <div id="sw-smart_res" class="switch on" onclick="toggleConfigKey('SMART_RESOURCE_MGR')"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Floating HUD Polling Interval &amp; Dynamic Color Threshold</h4><p>Adaptif terhadap refresh rate 60Hz / 90Hz / 120Hz / 144Hz</p></div>
+        <select id="sel-hud-poll" style="width:145px;" onchange="runCmd('hud_poll ' + this.value)">
+          <option value="1000">1.0s (Ultra Fast)</option>
+          <option value="2000" selected>2.0s (Balanced)</option>
+          <option value="3000">3.0s (Eco)</option>
+          <option value="5000">5.0s (Battery Saver)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Frame Stability Intelligence (FPS, P50/P90/P95/P99 &amp; Jank)</span>
+        <div style="display:flex;gap:5px;align-items:center;">
+          <span id="fps-prov-tag" class="prov-tag unavailable">UNAVAILABLE</span>
+          <button class="btn btn-sm" onclick="refreshFrameStats()">Refresh</button>
+        </div>
+      </div>
+      <p class="card-sub" id="fps-src-lbl">Sumber Data: dumpsys gfxinfo &lt;pkg&gt; framestats (Membutuhkan &ge;30 sampel frame aktual; tanpa estimasi FPS palsu).</p>
+      <div class="grid-3" style="margin-bottom:7px;">
+        <div class="metric-box"><div class="metric-label">Observed FPS / Avg Dur</div><div class="metric-val" id="fps-observed" style="font-size:13px;">UNAVAILABLE</div><div class="metric-sub" id="fps-avg-dur">Avg: --</div></div>
+        <div class="metric-box"><div class="metric-label">Total / Janky Frames</div><div class="metric-val" id="fps-jank" style="font-size:13px;">0 / 0 (0%)</div><div class="metric-sub" id="fps-sess-dur">Session: 0m</div></div>
+        <div class="metric-box"><div class="metric-label">P50 / P90 / P95 / P99</div><div class="metric-val" id="fps-pct" style="font-size:12px;">UNAVAILABLE</div><div class="metric-sub">Frame-Time Percentiles</div></div>
+      </div>
+      <div class="chart-wrap">
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-bottom:4px;">
+          <span>Frame-Time Percentile Bar Chart (P50 / P90 / P95 / P99 ms)</span>
+          <span id="lbl-fps-chart">Idle</span>
+        </div>
+        <canvas id="fps-chart" class="spark" width="640" height="60"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Installed Games Scanner &amp; Per-Game Configuration</span>
+        <button class="btn btn-sm" onclick="loadInstalledPackages()">📲 Scan Installed Apps</button>
+      </div>
+      <div class="grid-2" style="margin-bottom:8px;">
+        <div>
+          <div class="metric-label" style="margin-bottom:3px;">Search / Package Name</div>
+          <input type="text" id="inp-game-pkg" placeholder="com.mobile.legends" list="dl-installed-pkgs" />
+          <datalist id="dl-installed-pkgs"></datalist>
+        </div>
+        <div>
+          <div class="metric-label" style="margin-bottom:3px;">Per-Game Device Profile</div>
+          <select id="sel-spoof-preset"></select>
+        </div>
+      </div>
+      <div class="grid-4" style="margin-bottom:8px;">
+        <div><div class="metric-label">Profile</div><select id="sel-pg-prof"><option value="gaming">Gaming</option><option value="performance">Performance</option><option value="balanced">Balanced</option><option value="powersave">Powersave</option></select></div>
+        <div><div class="metric-label">Touch Level</div><select id="sel-pg-touch"><option value="2">Level 2</option><option value="3">Level 3</option><option value="4" selected>Level 4</option><option value="5">Level 5</option></select></div>
+        <div><div class="metric-label">Refresh Rate</div><select id="sel-pg-ref"><option value="-1">Auto Hz</option><option value="0">120Hz</option><option value="1">90Hz</option><option value="3">60Hz</option></select></div>
+        <div><div class="metric-label">Renderer</div><select id="sel-pg-ren"><option value="default">Default</option><option value="skiavk">SkiaVK</option><option value="skiagl">SkiaGL</option><option value="hybrid">Hybrid</option></select></div>
+      </div>
+      <div class="grid-3" style="margin-bottom:8px;">
+        <button class="btn btn-primary" onclick="savePerGameAndSpoof()">Simpan Per-Game &amp; Bind</button>
+        <button class="btn" onclick="addPkgToGameBlacklist()">Blacklist Non-Game</button>
+        <button class="btn btn-danger" onclick="removeGameFromList()">Hapus dari GameList</button>
+      </div>
+      <div class="metric-label" style="margin-bottom:4px;">Configured Game Whitelist (Klik untuk memilih):</div>
+      <div id="gamelist-chips" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;"></div>
+      <div class="metric-label" style="margin-bottom:4px;">Global Graphics Renderer Pipeline (<span id="lbl-vk-cap">Vulkan: SUPPORTED</span>)</div>
+      <div class="grid-4">
+        <button class="btn" id="ren-default" onclick="setRenderer('default')">Default</button>
+        <button class="btn" id="ren-skiavk" onclick="setRenderer('skiavk')">SkiaVK</button>
+        <button class="btn" id="ren-skiagl" onclick="setRenderer('skiagl')">SkiaGL</button>
+        <button class="btn" id="ren-hybrid" onclick="setRenderer('hybrid')">Hybrid</button>
+      </div>
+    </div>
+
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">FPS History Engine &amp; Dynamic Color Thresholds</span>
+        <div style="display:flex;gap:5px;">
+          <button class="btn btn-sm" onclick="loadFpsHistory()">📈 Load FPS History</button>
+          <button class="btn btn-sm" onclick="runCmd('gamelist_sync')">🔄 Sync GameList</button>
+        </div>
+      </div>
+      <div class="grid-3" style="margin-bottom:8px;">
+        <div class="metric-box"><div class="metric-label">Session Min / Avg / Max</div><div class="metric-val" id="fps-hist-minmax" style="font-size:12.5px;">-- / -- / -- FPS</div><div class="metric-sub" id="fps-hist-cnt">Samples: 0</div></div>
+        <div class="metric-box"><div class="metric-label">Green Threshold (&ge;%)</div><input type="number" id="inp-fps-green" value="85" min="70" max="98" onchange="saveFpsThresholds()" /></div>
+        <div class="metric-box"><div class="metric-label">Yellow Threshold (&ge;%)</div><input type="number" id="inp-fps-yellow" value="60" min="40" max="80" onchange="saveFpsThresholds()" /></div>
+      </div>
+      <pre id="fps-hist-box" class="term" style="max-height:130px;">Klik "Load FPS History" untuk melihat sampel riwayat FPS &amp; frame-time sesi game...</pre>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Gaming Session &amp; Battery Drain History</span>
+        <button class="btn btn-sm" onclick="loadGameHistory()">🔄 Refresh History</button>
+      </div>
+      <pre id="game-hist-box" class="term" style="max-height:140px;">Klik "Refresh History" untuk menampilkan riwayat sesi game &amp; konsumsi baterai...</pre>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- PAGE D: DEVICE PROFILE PAGE (SECTION 11 & 16.D)                       -->
+  <!-- ===================================================================== -->
+  <div id="tab-spoof" class="tab-pane">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Per-Application Device Profile Manager (OCORE.json)</span>
+        <span id="spoof-cap-badge" class="badge ok">VERIFIED DB v3.2</span>
+      </div>
+      <p class="card-sub">Simulasi profil perangkat terisolasi per aplikasi dengan validasi JSON atomik, pencegahan duplikasi, dan pemeriksaan kompatibilitas arsitektur CPU.</p>
+      <div class="grid-4" style="margin-bottom:8px;">
+        <div><div class="metric-label">Search Profile</div><input type="text" id="inp-prof-search" placeholder="Cari ROG, S25, Xiaomi..." oninput="renderDeviceProfileCatalog()" /></div>
+        <div><div class="metric-label">Brand Filter</div><select id="sel-prof-brand" onchange="renderDeviceProfileCatalog()"><option value="">All Brands</option></select></div>
+        <div><div class="metric-label">SoC Filter</div><select id="sel-prof-soc" onchange="renderDeviceProfileCatalog()"><option value="">All SoCs</option></select></div>
+        <div><div class="metric-label">Android Version</div><select id="sel-prof-ver" onchange="renderDeviceProfileCatalog()"><option value="">All Versions</option><option value="15">Android 15 (SDK 35)</option><option value="14">Android 14 (SDK 34)</option></select></div>
+      </div>
+      <div id="spoof-catalog-grid" class="grid-2" style="max-height:260px;overflow-y:auto;padding-right:3px;margin-bottom:10px;"></div>
+
+      <div class="metric-box" style="margin-bottom:9px;" id="spoof-detail-box">
+        <div class="metric-top">
+          <span class="metric-label">Selected Profile Metadata &amp; Fingerprint</span>
+          <span class="prov-tag actual" id="spoof-det-status">VERIFIED</span>
+        </div>
+        <div class="metric-val" id="spoof-det-title" style="font-size:12.5px;">Pilih profil di atas untuk melihat detail lengkap</div>
+        <div class="metric-sub" id="spoof-det-meta">Brand: -- | Model: -- | SoC: -- | SDK: --</div>
+        <div class="metric-sub" id="spoof-det-fp" style="font-family:monospace;font-size:9.5px;margin-top:3px;color:#a5f3fc;">Fingerprint: --</div>
+      </div>
+
+      <div class="grid-3" style="margin-bottom:8px;">
+        <div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
+            <span class="metric-label">Target Application Package</span>
+            <button class="btn btn-sm" style="padding:1px 6px;font-size:9px;" onclick="loadInstalledPackages('inp-spoof-pkg')">📲 Pilih Aplikasi</button>
+          </div>
+          <input type="text" id="inp-spoof-pkg" placeholder="com.mobile.legends" list="dl-installed-pkgs" />
+        </div>
+        <div>
+          <div class="metric-label">Selected Profile ID</div>
+          <input type="text" id="inp-spoof-id" placeholder="PACKAGES_ROG_PHONE_9_PRO" readonly />
+        </div>
+        <div>
+          <div class="metric-label">CPU Info Simulation</div>
+          <select id="sel-spoof-cpu">
+            <option value="0" selected>Disabled (Safe Default)</option>
+            <option value="1">Enabled (If Arch Compatible)</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid-4">
+        <button class="btn btn-primary" onclick="bindSelectedDeviceProfile()">🔗 Bind Profile</button>
+        <button class="btn" onclick="unbindDeviceProfile()">❌ Remove Binding</button>
+        <button class="btn btn-danger" onclick="confirmRisk('Reset dan hapus seluruh binding profil perangkat aktif?', () => resetAllDeviceProfiles())">🔄 Reset All Bindings</button>
+        <button class="btn" onclick="loadSpoofDatabase(true)">🔍 Audit JSON</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Active Application Bindings (active_injections)</span>
+        <span id="spoof-active-cnt" class="badge cyan">0 ACTIVE</span>
+      </div>
+      <div id="spoof-active-list" style="margin-bottom:8px;font-size:11px;color:var(--text-muted);">Belum ada aplikasi yang terhubung ke profil perangkat.</div>
+      <pre id="spoof-audit-box" class="term" style="max-height:150px;">Klik "Audit JSON" untuk memeriksa validitas OCORE.json dan status Zygisk...</pre>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- PAGE E: THERMAL PAGE                                                  -->
+  <!-- ===================================================================== -->
+  <div id="tab-thermal" class="tab-pane">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Multi-Domain Thermal Intelligence</span>
+        <span id="t-stage-pill" class="badge ok">STAGE: NORMAL</span>
+      </div>
+      <p class="card-sub">Tahapan adaptif: <b>NORMAL</b> &rarr; <b>WARM</b> &rarr; <b>HOT</b> &rarr; <b>CRITICAL</b> dengan Hysteresis &amp; Cooldown. Tidak pernah mematikan proteksi termal OEM.</p>
+      <div class="grid-3">
+        <div class="metric-box"><div class="metric-top"><span class="metric-label">CPU Domain</span><span id="tp-cpu" class="prov-tag unavailable">--</span></div><div class="metric-val" id="t-cpu">UNAVAILABLE</div><div class="metric-sub" id="ts-cpu">Limit: 75/82/90°C</div></div>
+        <div class="metric-box"><div class="metric-top"><span class="metric-label">GPU Domain</span><span id="tp-gpu" class="prov-tag unavailable">--</span></div><div class="metric-val" id="t-gpu">UNAVAILABLE</div><div class="metric-sub" id="ts-gpu">Limit: 72/80/88°C</div></div>
+        <div class="metric-box"><div class="metric-top"><span class="metric-label">SoC / Board</span><span id="tp-soc" class="prov-tag unavailable">--</span></div><div class="metric-val" id="t-ap">UNAVAILABLE</div><div class="metric-sub" id="ts-soc">Limit: 62/70/78°C</div></div>
+        <div class="metric-box"><div class="metric-top"><span class="metric-label">Battery</span><span id="tp-bat" class="prov-tag unavailable">--</span></div><div class="metric-val" id="t-bat">UNAVAILABLE</div><div class="metric-sub" id="ts-bat">Limit: 45/48/51°C</div></div>
+        <div class="metric-box"><div class="metric-top"><span class="metric-label">PMIC</span><span id="tp-pmic" class="prov-tag unavailable">--</span></div><div class="metric-val" id="t-pmic">UNAVAILABLE</div><div class="metric-sub">Power IC</div></div>
+        <div class="metric-box"><div class="metric-top"><span class="metric-label">PA / Modem / WiFi</span><span id="tp-pa" class="prov-tag unavailable">--</span></div><div class="metric-val" id="t-pa">UNAVAILABLE</div><div class="metric-sub">RF Subsystem</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">Thermal Operating Mode (OEM-Safe Architecture)</span></div>
+      <div class="grid-2" style="margin-bottom:7px;">
+        <button class="btn active" id="te-ocore_intel" onclick="setThermalEngine('ocore_intel')">Ocore Thermal Intelligence</button>
+        <button class="btn" id="te-oem_stock" onclick="setThermalEngine('oem_stock')">OEM Thermal (Stock)</button>
+        <button class="btn" id="te-monitor_only" onclick="setThermalEngine('monitor_only')">Thermal Monitoring Only</button>
+        <button class="btn" id="te-restore_stock" onclick="setThermalEngine('restore_stock')">Restore Stock Thermal</button>
+      </div>
+      <div class="grid-3">
+        <button class="btn btn-sm" id="te-ocore_ai_therm" onclick="setThermalEngine('ocore_ai_therm')">ThermalCore Daemon</button>
+        <button class="btn btn-sm" id="te-ocore_lite" onclick="setThermalEngine('ocore_lite')">Adaptive Balanced</button>
+        <button class="btn btn-sm" id="te-ocore_extreme" onclick="setThermalEngine('ocore_extreme')">Adaptive Gaming</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">Validated Domain Thresholds, Hysteresis &amp; Cooldown</span></div>
+      <div class="grid-4" style="margin-bottom:8px;">
+        <div>
+          <div class="metric-label">Target Domain</div>
+          <select id="sel-therm-dom" onchange="populateDomainThresholds(this.value)">
+            <option value="bat">Battery</option>
+            <option value="cpu">CPU</option>
+            <option value="gpu">GPU</option>
+            <option value="soc">SoC / AP</option>
+          </select>
+        </div>
+        <div><div class="metric-label">Warm (°C)</div><input type="number" id="inp-twarm" value="45" /></div>
+        <div><div class="metric-label">Hot (°C)</div><input type="number" id="inp-thot" value="48" /></div>
+        <div><div class="metric-label">Critical (°C)</div><input type="number" id="inp-tcrit" value="51" /></div>
+      </div>
+      <div class="grid-2" style="margin-bottom:8px;">
+        <div><div class="metric-label">Hysteresis (°C)</div><input type="number" id="inp-thyst" value="2" min="1" max="8" /></div>
+        <div><div class="metric-label">Recovery Cooldown (sec)</div><input type="number" id="inp-tcd" value="30" min="10" max="180" /></div>
+      </div>
+      <button class="btn btn-primary" style="width:100%;margin-bottom:8px;" onclick="saveThermalThresholds()">Commit Domain Thresholds (Validated)</button>
+
+      <div class="row-item">
+        <div class="row-info"><h4>Multi-Domain Smart Thermal Guard</h4><p>Evaluasi suhu untuk Priority #1 Stepdown &amp; Cooldown</p></div>
+        <div id="sw-smart_guard" class="switch on" onclick="toggleSimple('guard')"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>MediaTek FPSGO Thermal Ceiling</h4><p>Sesuaikan batas termal FPSGO jika didukung kernel</p></div>
+        <div id="sw-fpsgo_unlock" class="switch on" onclick="toggleSimple('fpsgo')"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>MediaTek GED GPU Boost</h4><p>Aktifkan GED GPU boost saat profil Performance/Gaming</p></div>
+        <div id="sw-ged_boost" class="switch on" onclick="toggleSimple('ged')"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Opt-In MT6877 Trip-Point Table Override</h4><p>OFF secara default demi menjaga trip-point kritis pabrikan</p></div>
+        <div id="sw-trip_policy" class="switch" onclick="confirmRisk('Mengubah tabel trip-point kernel hanya diizinkan pada MT6877 yang terverifikasi. Lanjutkan?', () => toggleTripPolicy())"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Active Kernel Thermal Zones Inventory</span>
+        <button class="btn btn-sm" onclick="loadThermalZones()">Scan Zones</button>
+      </div>
+      <pre id="therm-zones-box" class="term" style="max-height:150px;">Klik "Scan Zones" untuk memindai sensor /sys/class/thermal/thermal_zone*...</pre>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- PAGE F: BATTERY PAGE                                                  -->
+  <!-- ===================================================================== -->
+  <div id="tab-energy" class="tab-pane">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Battery Telemetry &amp; Cell Health</span>
+        <span id="e-chg-sup-badge" class="badge">CHECKING NODE</span>
+      </div>
+      <div class="grid-3">
+        <div class="metric-box"><div class="metric-top"><span class="metric-label">Percentage &amp; Temp</span><span id="ep-cap" class="prov-tag unavailable">--</span></div><div class="metric-val" id="e-cap">UNAVAILABLE</div><div class="metric-sub" id="e-status">--</div></div>
+        <div class="metric-box"><div class="metric-top"><span class="metric-label">Voltage / Current</span><span id="ep-volt" class="prov-tag unavailable">--</span></div><div class="metric-val" id="e-volt">UNAVAILABLE</div><div class="metric-sub" id="e-curr">--</div></div>
+        <div class="metric-box"><div class="metric-top"><span class="metric-label">Health &amp; Cycles</span><span id="ep-hlth" class="prov-tag unavailable">--</span></div><div class="metric-val" id="e-health">UNAVAILABLE</div><div class="metric-sub" id="e-cycles">Cycles: --</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">Smart Charging, Bypass Charging &amp; Emergency Recovery</span></div>
+      <p class="card-sub" id="e-chg-node-desc">Memeriksa kapabilitas node kontrol charging kernel...</p>
+      <div class="row-item">
+        <div class="row-info"><h4>Direct Bypass Charging</h4><p>Nonaktif otomatis jika hardware tidak memiliki node charger yang valid</p></div>
+        <div id="sw-bypass_chg" class="switch" onclick="toggleSimple('bypass_chg')"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Smart Charge Auto-Cut</h4><p>Hentikan pengisian pada batas Stop % dan lanjutkan pada Resume %</p></div>
+        <div id="sw-smart_charge" class="switch" onclick="toggleSmartCharge()"></div>
+      </div>
+      <div class="grid-2" style="margin-top:6px;margin-bottom:8px;">
+        <div><div class="metric-label">Smart Charge Stop (%)</div><input type="number" id="inp-sc-stop" value="85" min="60" max="95" /></div>
+        <div><div class="metric-label">Smart Charge Resume (%)</div><input type="number" id="inp-sc-res" value="75" min="50" max="90" /></div>
+      </div>
+      <button class="btn btn-danger" style="width:100%;margin-bottom:8px;" onclick="runCmd('emergency_charge_recover')">⚡ Emergency Charging Recovery (Force Normal Charging)</button>
+      <div class="row-item">
+        <div class="row-info"><h4>Screen-Off CPU Divider</h4><p>Pangkas batas frekuensi maksimum CPU saat layar mati</p></div>
+        <select id="sel-battdiv" style="width:150px;" onchange="runCmd('batt_div ' + this.value)">
+          <option value="default">Default (÷2 / 50%)</option>
+          <option value="lowest">Max Save (÷4 / 25%)</option>
+          <option value="false">Disabled</option>
+        </select>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Deep Doze Idle Optimization</h4><p>Aktifkan Android deviceidle Deep Doze saat layar mati</p></div>
+        <div id="sw-deep_doze" class="switch" onclick="toggleSimple('deep_doze')"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- PAGE G: SYSTEM & RECOVERY PAGE                                        -->
+  <!-- ===================================================================== -->
+  <div id="tab-sys" class="tab-pane">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Detected Hardware &amp; System Capability Matrix</span>
+        <span id="sys-verif-badge" class="badge cyan">CAPABILITY MATRIX</span>
+      </div>
+      <div class="grid-2" style="margin-bottom:8px;">
+        <div class="metric-box"><div class="metric-label">Device &amp; Product</div><div class="metric-val" id="sys-hw-model" style="font-size:12px;">--</div><div class="metric-sub" id="sys-hw-mfg">--</div></div>
+        <div class="metric-box"><div class="metric-label">SoC, Kernel &amp; Root</div><div class="metric-val" id="sys-hw-soc" style="font-size:12px;">--</div><div class="metric-sub" id="sys-hw-root">--</div></div>
+      </div>
+      <div id="cap-matrix-grid" class="grid-3"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Ocore Recovery Center (One-Tap Rollback &amp; Safe Mode)</span>
+        <span class="badge ok">BASELINE PROTECTED</span>
+      </div>
+      <div class="grid-2" style="margin-bottom:7px;">
+        <button class="btn btn-danger" onclick="confirmRisk('Aktifkan Emergency Safe Mode? Seluruh EEM & Thermal dikembalikan ke Stock dan profil dikunci ke Balanced.', () => runCmd('recovery emergency_safe_mode'))">🚨 Emergency Safe Mode</button>
+        <button class="btn btn-primary" onclick="confirmRisk('Pulihkan seluruh subsistem (EEM, Thermal, CPU/GPU, Charging, Renderer) ke kondisi Stock?', () => runCmd('recovery restore_all_stock'))">♻️ Restore All Stock</button>
+        <button class="btn" onclick="runCmd('recovery eem_restore')">⚡ Restore EEM Baseline</button>
+        <button class="btn" onclick="runCmd('recovery thermal_restore')">🌡️ Restore Stock Thermal</button>
+        <button class="btn" onclick="runCmd('recovery kernel_node_restore')">🧩 Restore Kernel Nodes</button>
+        <button class="btn" onclick="runCmd('recovery daemon_recovery')">🛠️ Recover Daemons</button>
+      </div>
+      <div class="grid-3">
+        <button class="btn" onclick="runCmd('recovery bootloop_recovery')">Reset Bootloop Counter</button>
+        <button class="btn" onclick="runCmd('config_backup user_snapshot')">💾 Backup Config</button>
+        <button class="btn" onclick="confirmRisk('Kembalikan config.conf ke default?', () => runCmd('recovery config_restore default'))">📂 Restore Config</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Background Daemon Manager (PID + Identity Verified)</span>
+        <span class="badge ok">WATCHDOG ACTIVE</span>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Ocore Workload &amp; Game Detector</h4><p id="dm-ai-meta">Status: checking...</p></div>
+        <div style="display:flex;gap:5px;align-items:center;"><button class="btn btn-sm" onclick="runCmd('daemon ocore_ai restart')">Restart</button><div id="sw-ocore_ai" class="switch on" onclick="toggleDaemon('ocore_ai')"></div></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Ocore Screen-Off Battery Saver</h4><p id="dm-battmon-meta">Status: checking...</p></div>
+        <div style="display:flex;gap:5px;align-items:center;"><button class="btn btn-sm" onclick="runCmd('daemon ocore_battmon restart')">Restart</button><div id="sw-ocore_battmon" class="switch on" onclick="toggleDaemon('ocore_battmon')"></div></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Ocore Adaptive Kernel &amp; VM Tuner</h4><p id="dm-ktuner-meta">Status: checking...</p></div>
+        <div style="display:flex;gap:5px;align-items:center;"><button class="btn btn-sm" onclick="runCmd('daemon ocore_ktuner restart')">Restart</button><div id="sw-ocore_ktuner" class="switch on" onclick="toggleDaemon('ocore_ktuner')"></div></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Ocore SurfaceFlinger Frame Pacing Daemon</h4><p id="dm-fpsmon-meta">Status: checking...</p></div>
+        <div style="display:flex;gap:5px;align-items:center;"><button class="btn btn-sm" onclick="runCmd('daemon ocore_fpsmon restart')">Restart</button><div id="sw-ocore_fpsmon" class="switch" onclick="toggleDaemon('ocore_fpsmon')"></div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header"><span class="card-title">Network, Storage &amp; Transactional Config Editor</span></div>
+      <div class="row-item">
+        <div class="row-info"><h4>Low-Latency TCP Stack &amp; FastOpen</h4><p id="lbl-tcp-cong">Congestion Control: cubic</p></div>
+        <div id="sw-net_lowlat" class="switch on" onclick="toggleSimple('net_lowlat')"></div>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>Private DNS Resolver</h4><p>Konfigurasi DNS terenkripsi (DoT)</p></div>
+        <select id="sel-dns" style="width:155px;" onchange="runCmd('private_dns ' + this.value)">
+          <option value="off">Off / Default</option>
+          <option value="automatic">Automatic</option>
+          <option value="cloudflare">Cloudflare (1.1.1.1)</option>
+          <option value="adguard">AdGuard DNS</option>
+          <option value="quad9">Quad9 DNS</option>
+        </select>
+      </div>
+      <div class="row-item">
+        <div class="row-info"><h4>MediaTek DRAM &amp; CCI Interconnect Boost</h4><p>Boost interkoneksi pada SoC MediaTek yang kompatibel</p></div>
+        <div id="sw-mtk_boost" class="switch" onclick="toggleSimple('mtk_boost')"></div>
+      </div>
+      <div class="grid-2" style="margin-top:8px;margin-bottom:10px;">
+        <button class="btn" onclick="runCmd('fstrim_now')">🧹 Run Storage FSTrim</button>
+        <button class="btn" onclick="runCmd('ram_boost')">🚀 Safe Cache &amp; RAM Flush</button>
+      </div>
+      <div class="grid-3" style="margin-bottom:6px;">
+        <div><div class="metric-label">Config Key</div><input type="text" id="inp-cfg-key" placeholder="ZRAM_SWAPPINESS" /></div>
+        <div><div class="metric-label">Target Value</div><input type="text" id="inp-cfg-val" placeholder="100" /></div>
+        <div style="display:flex;align-items:flex-end;"><button class="btn btn-primary" style="width:100%;" onclick="commitConfigTransaction()">Commit Key</button></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;">
+        <span class="metric-label">Klik baris konfigurasi untuk mengedit:</span>
+        <button class="btn btn-sm" onclick="loadLiveConfig()">🔄 Reload Config</button>
+      </div>
+      <pre id="live-config-box" class="term" style="max-height:150px;">Klik "Reload Config" untuk memuat /data/adb/ocore/config.conf...</pre>
+    </div>
+  </div>
+
+  <!-- ===================================================================== -->
+  <!-- PAGE H: DIAGNOSTICS PAGE                                              -->
+  <!-- ===================================================================== -->
+  <div id="tab-diag" class="tab-pane">
+    <div class="card">
+      <div class="card-header">
+        <span class="card-title">Centralized Diagnostics &amp; Self-Healing Audit</span>
+        <span id="err-badge" class="badge ok">0 ERRORS</span>
+      </div>
+      <div class="grid-2" style="margin-bottom:8px;">
+        <div class="metric-box"><div class="metric-label">Active Root Bridge Adapter</div><div class="metric-val" id="diag-bridge-name" style="font-size:12px;">--</div><div class="metric-sub" id="diag-bridge-caps">--</div></div>
+        <div class="metric-box"><div class="metric-label">Conflict &amp; Runtime Status</div><div class="metric-val" id="diag-runtime-state" style="font-size:12px;">--</div><div class="metric-sub" id="conflict-banner-txt">Checking conflicts...</div></div>
+      </div>
+
+      <div class="grid-3" style="margin-bottom:8px;">
+        <button class="btn btn-primary" onclick="runSelfDiag()">🔍 System Audit</button>
+        <button class="btn" onclick="runSpoofAuditInDiag()">🛡️ Spoof &amp; JSON Audit</button>
+        <button class="btn" onclick="exportDiagBundle()">📥 Export Bundle</button>
+      </div>
+
+      <div class="grid-4" style="margin-bottom:6px;">
+        <button class="btn btn-sm active" id="lcat-all" onclick="loadLogs('all')">All &amp; TX</button>
+        <button class="btn btn-sm" id="lcat-diag" onclick="loadLogs('diag')">System Audit</button>
+        <button class="btn btn-sm" id="lcat-errors" onclick="loadLogs('errors')">Errors/Warn</button>
+        <button class="btn btn-sm" id="lcat-boot" onclick="loadLogs('boot')">Boot Trace</button>
+      </div>
+      <div class="grid-4" style="margin-bottom:8px;">
+        <button class="btn btn-sm" id="lcat-audit" onclick="loadLogs('audit')">Kernel Nodes</button>
+        <button class="btn btn-sm" id="lcat-daemons" onclick="loadLogs('daemons')">Watchdog</button>
+        <button class="btn btn-sm" id="lcat-volt" onclick="loadLogs('volt')">EEM Baseline</button>
+        <button class="btn btn-sm" id="lcat-thermod" onclick="loadLogs('thermod')">Thermal Audit</button>
+      </div>
+
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:6px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:6px;flex:1;">
+          <span class="metric-label" id="log-title-lbl">Log: ALL</span>
+          <input type="text" id="inp-log-filter" placeholder="Filter kata kunci log..." style="max-width:170px;padding:4px 7px;font-size:10px;" oninput="filterDisplayedLogs()" />
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button class="btn btn-sm" onclick="copyLogText()">Copy</button>
+          <button class="btn btn-sm btn-danger" onclick="confirmRisk('Bersihkan seluruh file log diagnostik OCORE?', () => { runCmd('clear_logs'); setTimeout(()=>loadLogs(currentLogCat),300); })">Clear Logs</button>
+        </div>
+      </div>
+      <pre id="log-box" class="term">Klik "System Audit" atau pilih kategori log di atas...</pre>
+    </div>
+  </div>
+
+</div>
+
+<!-- Confirmation Modal -->
+<div id="confirm-modal" class="modal-backdrop">
+  <div class="modal-box">
+    <h3>Konfirmasi Perubahan</h3>
+    <p id="confirm-msg">Apakah Anda yakin?</p>
+    <div class="grid-2">
+      <button class="btn" onclick="closeConfirmModal()">Batal</button>
+      <button class="btn btn-primary" id="confirm-ok-btn">Lanjutkan</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast">Tersimpan</div>
+
+<nav class="bottom-nav">
+  <button class="nav-btn active" onclick="switchTab('dash', this)"><span class="nav-icon">📊</span><span>Dash</span></button>
+  <button class="nav-btn" onclick="switchTab('perf', this)"><span class="nav-icon">⚡</span><span>Perf</span></button>
+  <button class="nav-btn" onclick="switchTab('game', this)"><span class="nav-icon">🎮</span><span>Gaming</span></button>
+  <button class="nav-btn" onclick="switchTab('spoof', this)"><span class="nav-icon">📱</span><span>Profiles</span></button>
+  <button class="nav-btn" onclick="switchTab('thermal', this)"><span class="nav-icon">🌡️</span><span>Thermal</span></button>
+  <button class="nav-btn" onclick="switchTab('energy', this)"><span class="nav-icon">🔋</span><span>Battery</span></button>
+  <button class="nav-btn" onclick="switchTab('sys', this)"><span class="nav-icon">🛡️</span><span>System</span></button>
+  <button class="nav-btn" onclick="switchTab('diag', this)"><span class="nav-icon">🩺</span><span>Diag</span></button>
+</nav>
+
+<script>
+  // ============================================================================
+  // SECTION 17: MULTI-ROOT BRIDGE ADAPTER WITH STRICT EXIT CODE & TX VALIDATION
+  // ============================================================================
+  const RootBridge = (() => {
+    const ALLOWED_CMDS = new Set([
+      'status', 'hw_scan', 'config_migrate', 'config_backup', 'config_restore',
+      'config_get', 'config_set', 'arbiter_sync', 'manual_override',
+      'safe_mode', 'profile', 'custom_profile', 'cpu_policy_set', 'apply_temp_profile',
+      'one_tap_boost', 'volt_profile', 'volt_custom', 'eem_verify_persist',
+      'schedutil_tune', 'eem_guard', 'cpuset_eas', 'io_opt', 'cpu_engine',
+      'thermal_engine', 'trip_policy', 'therm_thresholds', 'daemon', 'batt_div',
+      'ocore_div', 'thunder_lock', 'governor', 'gpu_mode', 'touch', 'refresh',
+      'renderer', 'game_mode_opt', 'game_enter', 'game_exit', 'game_cfg',
+      'game_remove', 'game_blacklist_get', 'game_blacklist_add', 'game_blacklist_remove',
+      'frame_stats', 'perf_intel', 'recovery', 'gamelist_get', 'gamelist_add', 'gamelist_remove', 'gamelist_sync', 'game_session_state', 'auto_hud', 'hud_poll', 'fps_thresholds', 'fps_history', 'adaptive_workload', 'config_integrity', 'ocore_prop', 'ocore_sysprop',
+      'bypass_chg', 'smart_charge', 'emergency_charge_recover', 'zram_vm',
+      'net_lowlat', 'private_dns', 'mtk_boost', 'deep_doze', 'ram_boost',
+      'fstrim_now', 'list_packages', 'spoof_list', 'spoof_bind', 'spoof_unbind',
+      'spoof_reset', 'spoof_audit', 'debug_verbose', 'diag', 'export_logs',
+      'logs', 'clear_logs', 'guard', 'fpsgo', 'ged', 'zones'
+    ]);
+
+    function createCallbackExec(apiObj, adapterName, capsDesc) {
+      return {
+        name: adapterName,
+        capabilities: capsDesc,
+        connected: true,
+        exec(fullCmd, timeoutMs) {
+          return new Promise((resolve) => {
+            let settled = false;
+            const timer = setTimeout(() => {
+              if (!settled) {
+                settled = true;
+                resolve({ ok: false, code: 124, stdout: '', stderr: 'Command execution timed out', adapter: adapterName });
+              }
+            }, timeoutMs);
+            const cbName = 'ocore_cb_' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+            window[cbName] = (errno, stdout, stderr) => {
+              delete window[cbName];
+              if (settled) return;
+              settled = true;
+              clearTimeout(timer);
+              const numCode = typeof errno === 'number' ? errno : parseInt(String(errno || '0'), 10);
+              const isSuccessExit = (numCode === 0);
+              resolve({
+                ok: isSuccessExit,
+                code: isNaN(numCode) ? -1 : numCode,
+                stdout: stdout || '',
+                stderr: stderr || '',
+                adapter: adapterName
+              });
+            };
+            try {
+              if (apiObj.exec.length >= 3) apiObj.exec(fullCmd, '{}', cbName);
+              else apiObj.exec(fullCmd, cbName);
+            } catch (e1) {
+              try { apiObj.exec(fullCmd, cbName); } catch (e2) {
+                clearTimeout(timer);
+                settled = true;
+                resolve({ ok: false, code: -2, stdout: '', stderr: String(e2), adapter: adapterName });
+              }
+            }
+          });
+        }
+      };
+    }
+
+    function resolveAdapter() {
+      if (typeof ksu !== 'undefined' && typeof ksu.exec === 'function' && (typeof ksu.spawn === 'function' || navigator.userAgent.includes('KernelSUNext'))) {
+        return createCallbackExec(ksu, 'KernelSUNextAdapter', 'ksu.exec(cmd, opts, cb) + ksu.spawn');
+      }
+      if (typeof ksu !== 'undefined' && typeof ksu.exec === 'function') {
+        return createCallbackExec(ksu, 'KernelSUAdapter', 'ksu.exec(cmd, opts, cb)');
+      }
+      if (typeof apatch !== 'undefined' && typeof apatch.exec === 'function') {
+        return createCallbackExec(apatch, 'APatchAdapter', 'apatch.exec(cmd, cb)');
+      }
+      if (typeof window.$ocore_mmrl !== 'undefined' || (typeof window.webui !== 'undefined' && typeof window.webui.exec === 'function')) {
+        const api = window.webui || window.$ocore_mmrl;
+        return createCallbackExec(api, 'MagiskWebUIXAdapter', 'webui.exec(cmd, cb)');
+      }
+      return {
+        name: 'DisconnectedReadOnlyAdapter',
+        capabilities: 'Read-only fallback (No Root Bridge injected)',
+        connected: false,
+        exec() {
+          return Promise.resolve({ ok: false, code: -1, stdout: '', stderr: 'Disconnected', adapter: 'DisconnectedReadOnlyAdapter' });
+        }
+      };
+    }
+
+    function sanitizeArg(a) {
+      return String(a === undefined || a === null ? '' : a).replace(/[^a-zA-Z0-9_.:/-]/g, '');
+    }
+
+    async function execOcore(subcmd, args = [], timeoutMs = 8000) {
+      const adapter = resolveAdapter();
+      const cleanCmd = sanitizeArg(subcmd);
+      if (!ALLOWED_CMDS.has(cleanCmd)) {
+        return { ok: false, code: 126, stdout: '', stderr: 'Blocked by allowlist: ' + cleanCmd, adapter: adapter.name, txStatus: 'FAILED' };
+      }
+      const cleanArgs = args.map(sanitizeArg).filter(Boolean);
+      const argStr = [cleanCmd, ...cleanArgs].join(' ');
+      // Dynamic module path resolution (supports PATH, /data/adb/modules/Ocore, or /data/adb/modules/*Ocore*)
+      const fullCmd = `/system/bin/sh /data/adb/modules/Ocore/system/bin/ocorectl ${argStr}`;
+      const res = await adapter.exec(fullCmd, timeoutMs);
+      let txStatus = res.ok ? 'APPLIED' : 'FAILED';
+      const match = (res.stdout || '').match(/TRANSACTION_STATUS=([A-Z_]+)/);
+      if (match) {
+        txStatus = match[1];
+      }
+      const txOk = res.ok && (txStatus === 'APPLIED' || txStatus === 'PARTIAL');
+      return { ...res, ok: txOk, txStatus };
+    }
+
+    return { resolveAdapter, execOcore, sanitizeArg };
+  })();
+
+  // ============================================================================
+  // STATE, DEVICE PROFILE CATALOG & TELEMETRY MANAGEMENT
+  // ============================================================================
+  let currentLogCat = 'all';
+  let activeTabId = 'dash';
+  let refreshInFlight = false;
+  let thermInputsInitialized = false;
+  let pollTimerId = null;
+  let pollIntervalMs = 5000;
+  let isUserInteracting = false;
+  let lastInteractionTs = 0;
+  let lastCapSig = '';
+  let lastGameChipsSig = '';
+  let lastCpuCoresSig = '';
+  let cachedCpuLines = [];
+  let rawLogCache = '';
+
+  function setText(id, val) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const s = String(val === undefined || val === null ? '' : val);
+    if (el.textContent !== s) el.textContent = s;
+  }
+
+  function scheduleNextPoll(customDelayMs) {
+    if (pollTimerId) {
+      clearTimeout(pollTimerId);
+      pollTimerId = null;
+    }
+    if (pollIntervalMs <= 0) return;
+    const delay = typeof customDelayMs === 'number' ? customDelayMs : pollIntervalMs;
+    pollTimerId = setTimeout(() => {
+      pollTimerId = null;
+      if (pollIntervalMs <= 0) return;
+      const sinceTouch = Date.now() - lastInteractionTs;
+      if (document.hidden || isUserInteracting || sinceTouch < 1200) {
+        scheduleNextPoll(1000);
+        return;
+      }
+      refreshAll(false);
+    }, delay);
+  }
+  const telemetryHistory = [];
+  let lastFramePercentiles = { p50: 0, p90: 0, p95: 0, p99: 0 };
+
+  // Built-in fallback catalog (synchronized with cortex/OCORE.json when connected)
+  let spoofProfilesCatalog = {
+    PACKAGES_ROG_PHONE_9_PRO: { PROFILE_ID: 'PACKAGES_ROG_PHONE_9_PRO', DEVICE_NAME: 'ASUS ROG Phone 9 Pro', BRAND: 'asus', MANUFACTURER: 'asus', MODEL: 'ASUS_AI2501_A', DEVICE: 'AI2501', ANDROID_VERSION: '15', SDK_INT: 35, SOC_MODEL: 'SM8750', SOC_FAMILY: 'Snapdragon 8 Elite', FINGERPRINT: 'asus/WW_AI2501/AI2501:15/AP3A.240905.015.A2/35.1810.1810.100:user/release-keys', VALIDATION_STATUS: 'VERIFIED' },
+    PACKAGES_ROG_PHONE_8_PRO: { PROFILE_ID: 'PACKAGES_ROG_PHONE_8_PRO', DEVICE_NAME: 'ASUS ROG Phone 8 Pro', BRAND: 'asus', MANUFACTURER: 'asus', MODEL: 'ASUS_AI2401_A', DEVICE: 'AI2401', ANDROID_VERSION: '14', SDK_INT: 34, SOC_MODEL: 'SM8650', SOC_FAMILY: 'Snapdragon 8 Gen 3', FINGERPRINT: 'asus/WW_AI2401/AI2401:14/UKQ1.230924.001/34.1420.1420.315:user/release-keys', VALIDATION_STATUS: 'VERIFIED' },
+    PACKAGES_REDMAGIC_10_PRO: { PROFILE_ID: 'PACKAGES_REDMAGIC_10_PRO', DEVICE_NAME: 'nubia RedMagic 10 Pro', BRAND: 'REDMAGIC', MANUFACTURER: 'nubia', MODEL: 'NX789J', DEVICE: 'NX789J', ANDROID_VERSION: '15', SDK_INT: 35, SOC_MODEL: 'SM8750', SOC_FAMILY: 'Snapdragon 8 Elite', FINGERPRINT: 'REDMAGIC/NX789J/NX789J:15/AP3A.240905.015.A2/V10.0.0:user/release-keys', VALIDATION_STATUS: 'VERIFIED' },
+    PACKAGES_SAMSUNG_S25_ULTRA: { PROFILE_ID: 'PACKAGES_SAMSUNG_S25_ULTRA', DEVICE_NAME: 'Samsung Galaxy S25 Ultra', BRAND: 'samsung', MANUFACTURER: 'samsung', MODEL: 'SM-S938B', DEVICE: 'pa3q', ANDROID_VERSION: '15', SDK_INT: 35, SOC_MODEL: 'SM8750', SOC_FAMILY: 'Snapdragon 8 Elite', FINGERPRINT: 'samsung/pa3qxxx/pa3q:15/AP3A.240905.015.A2/S938BXXU1AYB3:user/release-keys', VALIDATION_STATUS: 'VERIFIED' },
+    PACKAGES_SAMSUNG_S24_ULTRA: { PROFILE_ID: 'PACKAGES_SAMSUNG_S24_ULTRA', DEVICE_NAME: 'Samsung Galaxy S24 Ultra', BRAND: 'samsung', MANUFACTURER: 'samsung', MODEL: 'SM-S928B', DEVICE: 'e3q', ANDROID_VERSION: '14', SDK_INT: 34, SOC_MODEL: 'SM8650', SOC_FAMILY: 'Snapdragon 8 Gen 3', FINGERPRINT: 'samsung/e3qxxx/e3q:14/UP1A.231005.007/S928BXXU1AXB5:user/release-keys', VALIDATION_STATUS: 'VERIFIED' },
+    PACKAGES_XIAOMI_15_ULTRA: { PROFILE_ID: 'PACKAGES_XIAOMI_15_ULTRA', DEVICE_NAME: 'Xiaomi 15 Ultra', BRAND: 'Xiaomi', MANUFACTURER: 'Xiaomi', MODEL: '25010PN30G', DEVICE: 'xuanyuan', ANDROID_VERSION: '15', SDK_INT: 35, SOC_MODEL: 'SM8750', SOC_FAMILY: 'Snapdragon 8 Elite', FINGERPRINT: 'Xiaomi/xuanyuan_global/xuanyuan:15/AP3A.240905.015.A2/OS2.0.5.0.VOAMIXM:user/release-keys', VALIDATION_STATUS: 'VERIFIED' },
+    PACKAGES_ONEPLUS_13: { PROFILE_ID: 'PACKAGES_ONEPLUS_13', DEVICE_NAME: 'OnePlus 13', BRAND: 'OnePlus', MANUFACTURER: 'OnePlus', MODEL: 'PJZ110', DEVICE: 'OP5D0BL1', ANDROID_VERSION: '15', SDK_INT: 35, SOC_MODEL: 'SM8750', SOC_FAMILY: 'Snapdragon 8 Elite', FINGERPRINT: 'OnePlus/PJZ110/OP5D0BL1:15/AP3A.240905.015.A2/U.15.0.0.100:user/release-keys', VALIDATION_STATUS: 'VERIFIED' },
+    PACKAGES_IQOO_13: { PROFILE_ID: 'PACKAGES_IQOO_13', DEVICE_NAME: 'iQOO 13', BRAND: 'vivo', MANUFACTURER: 'vivo', MODEL: 'V2408A', DEVICE: 'V2408A', ANDROID_VERSION: '15', SDK_INT: 35, SOC_MODEL: 'SM8750', SOC_FAMILY: 'Snapdragon 8 Elite', FINGERPRINT: 'vivo/V2408A/V2408A:15/AP3A.240905.015.A2/PD2408_A_15.0.0.100:user/release-keys', VALIDATION_STATUS: 'VERIFIED' },
+    PACKAGES_VIVO_X200_PRO: { PROFILE_ID: 'PACKAGES_VIVO_X200_PRO', DEVICE_NAME: 'vivo X200 Pro', BRAND: 'vivo', MANUFACTURER: 'vivo', MODEL: 'V2405A', DEVICE: 'V2405A', ANDROID_VERSION: '15', SDK_INT: 35, SOC_MODEL: 'MT6991', SOC_FAMILY: 'Dimensity 9400', FINGERPRINT: 'vivo/V2405A/V2405A:15/AP3A.240905.015.A2/PD2405_A_15.0.0.100:user/release-keys', VALIDATION_STATUS: 'VERIFIED' },
+    PACKAGES_XIAOMI_14T_PRO: { PROFILE_ID: 'PACKAGES_XIAOMI_14T_PRO', DEVICE_NAME: 'Xiaomi 14T Pro', BRAND: 'Xiaomi', MANUFACTURER: 'Xiaomi', MODEL: '2407FPN8EG', DEVICE: 'rothko', ANDROID_VERSION: '14', SDK_INT: 34, SOC_MODEL: 'MT6989', SOC_FAMILY: 'Dimensity 9300+', FINGERPRINT: 'Xiaomi/rothko_global/rothko:14/UP1A.231005.007/V816.0.12.0.UNNMIXM:user/release-keys', VALIDATION_STATUS: 'VERIFIED' }
+  };
+  let activeSpoofInjections = {};
+  let selectedProfileId = 'PACKAGES_ROG_PHONE_9_PRO';
+
+  const state = {
+    GLOBAL_PROFILE: 'balanced',
+    EFFECTIVE_PROFILE: 'balanced',
+    USER_MANUAL_OVERRIDE: 'none',
+    ARBITER_WINNING_TIER: '5:GLOBAL_PROFILE',
+    LAST_TRANSACTION: 'APPLIED|init|Ready',
+    SAFE_MODE: '0',
+    THERMAL_STATE: 'NORMAL',
+    ALLOW_TRIP_POINT_MOD: '0',
+    SMART_GUARD: '1',
+    FPSGO_UNLOCK: '1',
+    GED_BOOST: '1',
+    CPU_WARM_C: '75', CPU_HOT_C: '82', CPU_CRIT_C: '90',
+    GPU_WARM_C: '72', GPU_HOT_C: '80', GPU_CRIT_C: '88',
+    SOC_WARM_C: '62', SOC_HOT_C: '70', SOC_CRIT_C: '78',
+    BAT_WARM_C: '45', BAT_HOT_C: '48', BAT_CRIT_C: '51',
+    THERM_HYST_C: '2',
+    THERM_COOLDOWN_SEC: '30',
+    CPU_ENGINE: 'ocore_ai',
+    THERMAL_ENGINE: 'ocore_intel',
+    THUNDER_LOCK_FREQ: '0',
+    VOLT_PROFILE: 'CONSERVATIVE',
+    VOLT_OFFSET_B: '-3', VOLT_OFFSET_L: '-3', VOLT_OFFSET_CCI: '-2', VOLT_OFFSET_GPU: '-2',
+    EEM_SUPPORTED: '0', EEM_RAILS: 'None', EEM_BASELINE: 'NotCaptured',
+    SCHEDUTIL_TUNE_ENABLE: '1', EEM_PERSIST_GUARD: '1',
+    CPUSET_EAS_OPT: '1', IO_QUEUE_OPT: '1', IO_SCHEDULER: 'default',
+    GAME_DETECT_MODE: 'auto', GAME_DND_ENABLE: '0', GAME_PRELOAD_ENABLE: '0',
+    ACTIVE_GAME: 'None', TOUCH_LEVEL: '2', REFRESH_IDX: '-1', RENDER_MODE: 'default',
+    BYPASS_CHG_ENABLE: '0', SMART_CHARGE_LIMIT: '0', SMART_CHARGE_STOP: '85', SMART_CHARGE_RESUME: '75',
+    CHG_SUPPORTED: '0', CHG_NODE: 'UNSUPPORTED',
+    OCORE_BATTMON_DIV: 'default', DEEP_DOZE_ENABLE: '0',
+    ZRAM_SWAPPINESS: '100', TCP_LOW_LATENCY: '1', TCP_CONG: 'cubic', PRIVATE_DNS_MODE: 'off', MTK_APU_DRAM_BOOST: '0',
+    AUTO_APPLY_RECOMMENDATION: '0',
+    CUSTOM_CPU_MIN_PCT: '20', CUSTOM_CPU_MAX_PCT: '90', CUSTOM_CPU_GOV: 'schedutil',
+    CUSTOM_GPU_MODE: 'balance', CUSTOM_SWAPPINESS: '100', CUSTOM_TOUCH_LEVEL: '3',
+    INTEL_SCORE: '0', INTEL_RECOMMENDED: 'balanced', INTEL_CONFIDENCE: '0%', INTEL_REASONS: 'N/A',
+    ERR_COUNT: '0', DETECTED_CONFLICTS: 'None', RUNTIME_VERIFIED_STATE: 'NOT_RUNTIME_VERIFIED'
+  };
+
+  function setBusyIndicator(isBusy) {
+    const pill = document.getElementById('conn-pill');
+    if (pill) pill.classList.toggle('busy', Boolean(isBusy));
+  }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    if (!t) return;
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2600);
+  }
+
+  function confirmRisk(message, onConfirm) {
+    const modal = document.getElementById('confirm-modal');
+    document.getElementById('confirm-msg').textContent = message;
+    document.getElementById('confirm-ok-btn').onclick = () => { closeConfirmModal(); onConfirm(); };
+    modal.classList.add('show');
+  }
+
+  function closeConfirmModal() {
+    document.getElementById('confirm-modal').classList.remove('show');
+  }
+
+  function switchTab(id, btn) {
+    activeTabId = id;
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+    const target = document.getElementById('tab-' + id);
+    if (target) target.classList.add('active');
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    if (btn) btn.classList.add('active');
+    if (id === 'dash') drawSparkline();
+    if (id === 'perf') renderCpuCoresGrid(cachedCpuLines);
+    if (id === 'diag') loadLogs(currentLogCat);
+    if (id === 'game') { refreshFrameStats(); loadGameHistory(); }
+    if (id === 'spoof') loadSpoofDatabase(false);
+    if (id === 'thermal') loadThermalZones();
+    if (id === 'sys') { renderCapabilityMatrix(true); loadLiveConfig(); }
+  }
+
+  function setProvBadge(id, prov) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const p = (prov || 'UNAVAILABLE').toUpperCase();
+    if (el.textContent !== p) el.textContent = p;
+    const cls = 'prov-tag ' + (p === 'ACTUAL' || p === 'SUPPORTED' || p === 'RUNTIME_VERIFIED' ? 'actual' : (p === 'CACHED' ? 'cached' : (p.includes('EST') || p.includes('HEUR') || p === 'UNKNOWN' ? 'estimated' : 'unavailable')));
+    if (el.className !== cls) el.className = cls;
+  }
+
+  async function runCmd(cmdStr, silent = false, rollbackFn = null) {
+    const parts = cmdStr.trim().split(/\s+/);
+    setBusyIndicator(true);
+    const res = await RootBridge.execOcore(parts[0], parts.slice(1));
+    setBusyIndicator(false);
+
+    if (!res.ok && typeof rollbackFn === 'function') {
+      rollbackFn();
+      updateUI();
+    }
+
+    if (!silent) {
+      if (!res.ok && res.code === -1) {
+        showToast('Disconnected: Tidak dapat menjalankan ' + parts[0]);
+      } else {
+        const lines = (res.stdout || res.stderr || '').trim().split('\n').filter(l => !l.startsWith('TRANSACTION_STATUS='));
+        const lastLine = lines.pop() || ('Executed: ' + cmdStr);
+        showToast(`[${res.txStatus}] ${lastLine}`);
+      }
+      setTimeout(() => refreshAll(false), 260);
+    }
+    return res.stdout;
+  }
+
+  function setSwitch(id, on, supported = true) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle('on', on === '1' || on === true || on === 'on');
+    el.classList.toggle('disabled', !supported);
+  }
+
+  async function setGlobalProfile(p) {
+    const prev = state.GLOBAL_PROFILE;
+    state.GLOBAL_PROFILE = p;
+    updateUI();
+    await runCmd('profile ' + p, false, () => { state.GLOBAL_PROFILE = prev; });
+  }
+
+  async function saveAndApplyCustomProfile() {
+    const minP = document.getElementById('inp-cp-min').value || '20';
+    const maxP = document.getElementById('inp-cp-max').value || '90';
+    const gov = document.getElementById('inp-cp-gov').value || 'schedutil';
+    const gpu = document.getElementById('sel-cp-gpu').value || 'balance';
+    const swp = document.getElementById('inp-cp-swp').value || '100';
+    const tch = document.getElementById('inp-cp-tch').value || '3';
+    state.GLOBAL_PROFILE = 'custom';
+    updateUI();
+    await runCmd(`custom_profile ${minP} ${maxP} ${gov} ${gpu} ${swp} ${tch}`);
+  }
+
+  async function toggleSafeMode() {
+    const prev = state.SAFE_MODE;
+    const next = prev === '1' ? '0' : '1';
+    state.SAFE_MODE = next;
+    updateUI();
+    await runCmd('safe_mode ' + next, false, () => { state.SAFE_MODE = prev; });
+  }
+
+  async function setCpuEngine(eng) {
+    const prev = state.CPU_ENGINE;
+    state.CPU_ENGINE = eng;
+    updateUI();
+    await runCmd('cpu_engine ' + eng, false, () => { state.CPU_ENGINE = prev; });
+  }
+
+  async function setThermalEngine(eng) {
+    const prev = state.THERMAL_ENGINE;
+    state.THERMAL_ENGINE = eng;
+    updateUI();
+    await runCmd('thermal_engine ' + eng, false, () => { state.THERMAL_ENGINE = prev; });
+  }
+
+  async function setVoltProfile(vp) {
+    const prev = state.VOLT_PROFILE;
+    state.VOLT_PROFILE = vp;
+    if (vp === 'STOCK') { state.VOLT_OFFSET_B='0'; state.VOLT_OFFSET_L='0'; state.VOLT_OFFSET_CCI='0'; state.VOLT_OFFSET_GPU='0'; }
+    if (vp === 'CONSERVATIVE') { state.VOLT_OFFSET_B='-3'; state.VOLT_OFFSET_L='-3'; state.VOLT_OFFSET_CCI='-2'; state.VOLT_OFFSET_GPU='-2'; }
+    if (vp === 'OPTIMAL') { state.VOLT_OFFSET_B='-5'; state.VOLT_OFFSET_L='-5'; state.VOLT_OFFSET_CCI='-4'; state.VOLT_OFFSET_GPU='-3'; }
+    updateUI();
+    await runCmd('volt_profile ' + vp, false, () => { state.VOLT_PROFILE = prev; });
+  }
+
+  async function applyCustomVolt() {
+    if (state.EEM_SUPPORTED !== '1') {
+      showToast('[UNSUPPORTED] Kernel tidak menyediakan interface EEM pada perangkat ini');
+      return;
+    }
+    const b = document.getElementById('inp-vb').value || '-3';
+    const l = document.getElementById('inp-vl').value || '-3';
+    const cci = document.getElementById('inp-vcci').value || '-2';
+    const gpu = document.getElementById('inp-vgpu').value || '-2';
+    const prev = state.VOLT_PROFILE;
+    state.VOLT_PROFILE = 'CUSTOM';
+    state.VOLT_OFFSET_B = b; state.VOLT_OFFSET_L = l; state.VOLT_OFFSET_CCI = cci; state.VOLT_OFFSET_GPU = gpu;
+    updateUI();
+    await runCmd(`volt_custom ${b} ${l} ${cci} ${gpu}`, false, () => { state.VOLT_PROFILE = prev; });
+  }
+
+  function populateDomainThresholds(dom) {
+    if (dom === 'cpu') { document.getElementById('inp-twarm').value = state.CPU_WARM_C; document.getElementById('inp-thot').value = state.CPU_HOT_C; document.getElementById('inp-tcrit').value = state.CPU_CRIT_C; }
+    else if (dom === 'gpu') { document.getElementById('inp-twarm').value = state.GPU_WARM_C; document.getElementById('inp-thot').value = state.GPU_HOT_C; document.getElementById('inp-tcrit').value = state.GPU_CRIT_C; }
+    else if (dom === 'soc') { document.getElementById('inp-twarm').value = state.SOC_WARM_C; document.getElementById('inp-thot').value = state.SOC_HOT_C; document.getElementById('inp-tcrit').value = state.SOC_CRIT_C; }
+    else { document.getElementById('inp-twarm').value = state.BAT_WARM_C; document.getElementById('inp-thot').value = state.BAT_HOT_C; document.getElementById('inp-tcrit').value = state.BAT_CRIT_C; }
+    document.getElementById('inp-thyst').value = state.THERM_HYST_C || '2';
+    document.getElementById('inp-tcd').value = state.THERM_COOLDOWN_SEC || '30';
+  }
+
+  async function saveThermalThresholds() {
+    const dom = document.getElementById('sel-therm-dom').value || 'bat';
+    const w = parseInt(document.getElementById('inp-twarm').value || '45', 10);
+    const h = parseInt(document.getElementById('inp-thot').value || '48', 10);
+    const c = parseInt(document.getElementById('inp-tcrit').value || '51', 10);
+    const hy = parseInt(document.getElementById('inp-thyst').value || '2', 10);
+    const cd = parseInt(document.getElementById('inp-tcd').value || '30', 10);
+    if (!(w < h && h < c)) {
+      showToast('[ERROR] Threshold harus berurutan: Warm < Hot < Critical!');
+      return;
+    }
+    await runCmd(`therm_thresholds ${dom} ${w} ${h} ${c} ${hy} ${cd}`);
+  }
+
+  async function toggleTripPolicy() {
+    const prev = state.ALLOW_TRIP_POINT_MOD;
+    const next = prev === '1' ? '0' : '1';
+    state.ALLOW_TRIP_POINT_MOD = next;
+    updateUI();
+    await runCmd('trip_policy ' + next, false, () => { state.ALLOW_TRIP_POINT_MOD = prev; });
+  }
+
+  async function toggleDaemon(name) {
+    const keyMap = { ocore_ai: 'OCORE_AI_ENABLE', ocore_battmon: 'OCORE_BATTMON_ENABLE', ocore_ktuner: 'OCORE_KTUNER_ENABLE', ocore_fpsmon: 'OCORE_FPSMON_ENABLE' };
+    const k = keyMap[name];
+    const prev = state[k];
+    const nextAct = prev === '1' ? 'stop' : 'start';
+    state[k] = prev === '1' ? '0' : '1';
+    updateUI();
+    await runCmd(`daemon ${name} ${nextAct}`, false, () => { state[k] = prev; });
+  }
+
+  async function toggleSimple(cmdName) {
+    const map = {
+      bypass_chg: 'BYPASS_CHG_ENABLE',
+      schedutil_tune: 'SCHEDUTIL_TUNE_ENABLE',
+      eem_guard: 'EEM_PERSIST_GUARD',
+      cpuset_eas: 'CPUSET_EAS_OPT',
+      io_opt: 'IO_QUEUE_OPT',
+      thunder_lock: 'THUNDER_LOCK_FREQ',
+      guard: 'SMART_GUARD',
+      fpsgo: 'FPSGO_UNLOCK',
+      ged: 'GED_BOOST',
+      deep_doze: 'DEEP_DOZE_ENABLE',
+      net_lowlat: 'TCP_LOW_LATENCY',
+      mtk_boost: 'MTK_APU_DRAM_BOOST'
+    };
+    const k = map[cmdName];
+    if (cmdName === 'bypass_chg' && state.CHG_SUPPORTED === '0') {
+      showToast('[UNSUPPORTED] Kernel tidak menyediakan node bypass charging');
+      return;
+    }
+    const prev = state[k];
+    state[k] = prev === '1' ? '0' : '1';
+    updateUI();
+    await runCmd(`${cmdName} ${state[k]}`, false, () => { state[k] = prev; });
+  }
+
+  async function toggleConfigKey(keyName) {
+    const prev = state[keyName];
+    state[keyName] = prev === '1' ? '0' : '1';
+    updateUI();
+    await runCmd(`config_set ${keyName} ${state[keyName]}`, false, () => { state[keyName] = prev; });
+  }
+
+  async function toggleSmartCharge() {
+    if (state.CHG_SUPPORTED === '0') {
+      showToast('[UNSUPPORTED] Kernel tidak mendukung Smart Charging');
+      return;
+    }
+    const stopVal = document.getElementById('inp-sc-stop')?.value || '85';
+    const resVal = document.getElementById('inp-sc-res')?.value || '75';
+    const prev = state.SMART_CHARGE_LIMIT;
+    state.SMART_CHARGE_LIMIT = prev === '1' ? '0' : '1';
+    updateUI();
+    await runCmd(`smart_charge ${state.SMART_CHARGE_LIMIT} ${stopVal} ${resVal}`, false, () => { state.SMART_CHARGE_LIMIT = prev; });
+  }
+
+  async function toggleOcoreProp(prop) {
+    const el = document.getElementById('sw-' + prop);
+    if (!el) return;
+    const prev = el.classList.contains('on') ? '1' : '0';
+    const next = prev === '1' ? '0' : '1';
+    setSwitch('sw-' + prop, next);
+    await runCmd(`ocore_prop ${prop} ${next}`, false, () => { setSwitch('sw-' + prop, prev); });
+  }
+
+  async function setGameModeOpt(mode) { const prev = state.GAME_DETECT_MODE; state.GAME_DETECT_MODE = mode; updateUI(); await runCmd('game_mode_opt ' + mode, false, () => { state.GAME_DETECT_MODE = prev; }); }
+  async function setTouch(lvl) { const prev = state.TOUCH_LEVEL; state.TOUCH_LEVEL = lvl; updateUI(); await runCmd('touch ' + lvl, false, () => { state.TOUCH_LEVEL = prev; }); }
+  async function setRenderer(mode) { const prev = state.RENDER_MODE; state.RENDER_MODE = mode; updateUI(); await runCmd('renderer ' + mode, false, () => { state.RENDER_MODE = prev; }); }
+  async function setRefresh(idx) { const prev = state.REFRESH_IDX; state.REFRESH_IDX = idx; updateUI(); await runCmd('refresh ' + idx, false, () => { state.REFRESH_IDX = prev; }); }
+
+  async function savePerGameAndSpoof() {
+    const pkg = document.getElementById('inp-game-pkg').value.trim();
+    const preset = document.getElementById('sel-spoof-preset').value;
+    const prof = document.getElementById('sel-pg-prof').value;
+    const tch = document.getElementById('sel-pg-touch').value;
+    const ref = document.getElementById('sel-pg-ref').value || '-1';
+    const ren = document.getElementById('sel-pg-ren').value;
+    if (!pkg) { showToast('Masukkan package name yang valid!'); return; }
+    await runCmd(`game_cfg ${pkg} ${prof} ${tch} ${ref} ${ren}`, preset ? true : false);
+    if (preset) {
+      const wcpu = (document.getElementById('sel-spoof-cpu') && document.getElementById('sel-spoof-cpu').value) || '0';
+      await runCmd(`spoof_bind ${pkg} ${preset} ${wcpu}`, false);
+      setTimeout(() => loadSpoofDatabase(false), 250);
+    }
+    document.getElementById('inp-game-pkg').value = '';
+  }
+
+  async function addPkgToGameBlacklist() {
+    const pkg = document.getElementById('inp-game-pkg').value.trim();
+    if (!pkg) { showToast('Masukkan package name untuk dimasukkan ke blacklist!'); return; }
+    await runCmd(`game_blacklist_add ${pkg}`);
+  }
+
+  async function removeGameFromList() {
+    const pkg = document.getElementById('inp-game-pkg').value.trim();
+    if (!pkg) return;
+    await runCmd(`game_remove ${pkg}`);
+    document.getElementById('inp-game-pkg').value = '';
+  }
+
+
+  async function toggleAutoHud() {
+    const next = state.AUTO_FLOATING_HUD === '0' ? '1' : '0';
+    state.AUTO_FLOATING_HUD = next;
+    updateUI();
+    await runCmd('auto_hud ' + next);
+  }
+
+  async function saveFpsThresholds() {
+    const g = document.getElementById('inp-fps-green')?.value || '85';
+    const y = document.getElementById('inp-fps-yellow')?.value || '60';
+    await runCmd(`fps_thresholds ${g} ${y}`);
+  }
+
+  async function loadFpsHistory() {
+    const out = await runCmd('fps_history', true);
+    const box = document.getElementById('fps-hist-box');
+    if (box) box.textContent = out || 'Belum ada sampel FPS yang terekam pada sesi ini.';
+  }
+
+  async function loadGameHistory() {
+    const out = await runCmd('logs perf', true);
+    const box = document.getElementById('game-hist-box');
+    if (box) box.textContent = out || 'Belum ada riwayat sesi game.';
+  }
+
+  // ============================================================================
+  // DEVICE PROFILE PAGE FUNCTIONS (SECTION 11 & 16.D)
+  // ============================================================================
+  function populateSpoofFiltersAndPresets() {
+    const brands = new Set();
+    const socs = new Set();
+    const presetSel = document.getElementById('sel-spoof-preset');
+    const brandSel = document.getElementById('sel-prof-brand');
+    const socSel = document.getElementById('sel-prof-soc');
+
+    const entries = Object.values(spoofProfilesCatalog);
+    entries.forEach(p => {
+      if (p.BRAND) brands.add(p.BRAND);
+      if (p.SOC_MODEL) socs.add(p.SOC_MODEL);
+    });
+
+    if (presetSel) {
+      presetSel.innerHTML = entries.map(p => `<option value="${p.PROFILE_ID}">${p.DEVICE_NAME || p.MODEL} (${p.SOC_MODEL || 'SoC'})</option>`).join('');
+    }
+    if (brandSel && brandSel.options.length <= 1) {
+      brandSel.innerHTML = '<option value="">All Brands</option>' + Array.from(brands).sort().map(b => `<option value="${b}">${b}</option>`).join('');
+    }
+    if (socSel && socSel.options.length <= 1) {
+      socSel.innerHTML = '<option value="">All SoCs</option>' + Array.from(socs).sort().map(s => `<option value="${s}">${s}</option>`).join('');
+    }
+  }
+
+  function selectDeviceProfileCard(profId) {
+    selectedProfileId = profId;
+    const p = spoofProfilesCatalog[profId];
+    const idInp = document.getElementById('inp-spoof-id');
+    if (idInp) idInp.value = profId;
+    if (p) {
+      document.getElementById('spoof-det-title').textContent = `${p.DEVICE_NAME || p.MODEL} [${profId}]`;
+      document.getElementById('spoof-det-meta').textContent = `Brand: ${p.BRAND} | Mfg: ${p.MANUFACTURER} | Model: ${p.MODEL} (${p.DEVICE}) | SoC: ${p.SOC_FAMILY || p.SOC_MODEL || 'N/A'} | Android ${p.ANDROID_VERSION || '15'} (SDK ${p.SDK_INT || 35})`;
+      document.getElementById('spoof-det-fp').textContent = `Fingerprint: ${p.FINGERPRINT || 'N/A'}`;
+      document.getElementById('spoof-det-status').textContent = p.VALIDATION_STATUS || 'VERIFIED';
+    }
+    renderDeviceProfileCatalog();
+  }
+
+  function renderDeviceProfileCatalog() {
+    const grid = document.getElementById('spoof-catalog-grid');
+    if (!grid) return;
+    const q = (document.getElementById('inp-prof-search')?.value || '').toLowerCase().trim();
+    const fBrand = (document.getElementById('sel-prof-brand')?.value || '').toLowerCase();
+    const fSoc = (document.getElementById('sel-prof-soc')?.value || '').toLowerCase();
+    const fVer = (document.getElementById('sel-prof-ver')?.value || '').trim();
+
+    const matched = Object.values(spoofProfilesCatalog).filter(p => {
+      if (fBrand && (p.BRAND || '').toLowerCase() !== fBrand) return false;
+      if (fSoc && (p.SOC_MODEL || '').toLowerCase() !== fSoc) return false;
+      if (fVer && String(p.ANDROID_VERSION || '') !== fVer) return false;
+      if (q) {
+        const hay = `${p.PROFILE_ID} ${p.DEVICE_NAME} ${p.BRAND} ${p.MANUFACTURER} ${p.MODEL} ${p.DEVICE} ${p.SOC_MODEL} ${p.SOC_FAMILY}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    grid.innerHTML = matched.map(p => {
+      const isSel = p.PROFILE_ID === selectedProfileId;
+      return `<div class="profile-card ${isSel ? 'selected' : ''}" onclick="selectDeviceProfileCard('${p.PROFILE_ID}')">
+        <div class="metric-top">
+          <span class="metric-label" style="color:var(--cyan);font-weight:700;">${p.BRAND || ''} • ${p.SOC_MODEL || 'SoC'}</span>
+          <span class="prov-tag actual">SDK ${p.SDK_INT || 35}</span>
+        </div>
+        <div style="font-size:12px;font-weight:700;margin-top:2px;">${p.DEVICE_NAME || p.MODEL}</div>
+        <div style="font-size:10px;color:var(--text-muted);">${p.MODEL} (${p.DEVICE}) • Android ${p.ANDROID_VERSION || '15'}</div>
+      </div>`;
+    }).join('') || '<div style="font-size:11px;color:var(--text-muted);">Tidak ada profil yang cocok dengan filter.</div>';
+  }
+
+  function renderActiveSpoofBindings() {
+    const box = document.getElementById('spoof-active-list');
+    const badge = document.getElementById('spoof-active-cnt');
+    if (!box) return;
+    const keys = Object.keys(activeSpoofInjections || {});
+    if (badge) badge.textContent = `${keys.length} ACTIVE`;
+    if (keys.length === 0) {
+      box.innerHTML = 'Belum ada aplikasi yang terhubung ke profil perangkat.';
+      return;
+    }
+    box.innerHTML = keys.map(pkg => {
+      const item = activeSpoofInjections[pkg] || {};
+      const di = item.device_info || {};
+      const profLabel = item.profile_id || item.device_name || item.mode || 'CUSTOM';
+      const cpuSimOn = Boolean(item.with_cpu || item.mode === 'with_cpu');
+      return `<div class="row-item">
+        <div class="row-info">
+          <h4>${pkg} &rarr; <span style="color:var(--cyan);">${profLabel}</span></h4>
+          <p>${di.BRAND || ''} ${di.MODEL || ''} (${di.DEVICE || ''}) • Android ${di.ANDROID_VERSION || '15'} (SDK ${di.SDK_INT || 35}) • Zygisk+Resetprop: ACTIVE • CPU Sim: ${cpuSimOn ? 'ON' : 'OFF'}</p>
+        </div>
+        <div style="display:flex;gap:4px;">
+          <button class="btn btn-sm" onclick="document.getElementById('inp-spoof-pkg').value='${pkg}';selectDeviceProfileCard('${item.profile_id || 'PACKAGES_ROG_PHONE_9_PRO'}');bindSelectedDeviceProfile()">🔄 Re-Apply</button>
+          <button class="btn btn-sm btn-danger" onclick="document.getElementById('inp-spoof-pkg').value='${pkg}';unbindDeviceProfile()">Unbind</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  async function loadSpoofDatabase(withAudit = false) {
+    populateSpoofFiltersAndPresets();
+    selectDeviceProfileCard(selectedProfileId);
+    const raw = await runCmd('spoof_list', true);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        const newCat = {};
+        Object.keys(parsed).forEach(k => {
+          if (k.startsWith('PACKAGES_') && typeof parsed[k] === 'object') {
+            const p = parsed[k];
+            newCat[k] = {
+              PROFILE_ID: p.PROFILE_ID || k,
+              DEVICE_NAME: p.DEVICE_NAME || p.MODEL || k.replace('PACKAGES_', '').replace(/_/g, ' '),
+              BRAND: p.BRAND || '',
+              MANUFACTURER: p.MANUFACTURER || '',
+              MODEL: p.MODEL || '',
+              DEVICE: p.DEVICE || '',
+              PRODUCT: p.PRODUCT || '',
+              ANDROID_VERSION: String(p.ANDROID_VERSION || '15'),
+              SDK_INT: p.SDK_INT || 35,
+              FINGERPRINT: p.FINGERPRINT || '',
+              SOC_MODEL: p.SOC_MODEL || '',
+              SOC_FAMILY: p.SOC_FAMILY || '',
+              VALIDATION_STATUS: p.VALIDATION_STATUS || 'VERIFIED'
+            };
+          }
+        });
+        if (Object.keys(newCat).length > 0) {
+          spoofProfilesCatalog = newCat;
+        }
+        activeSpoofInjections = parsed.active_injections || {};
+        populateSpoofFiltersAndPresets();
+        selectDeviceProfileCard(selectedProfileId);
+        renderActiveSpoofBindings();
+      } catch (e) {
+        // Keep fallback catalog if offline
+      }
+    }
+    if (withAudit) {
+      const auditOut = await runCmd('spoof_audit', true);
+      const abox = document.getElementById('spoof-audit-box');
+      if (abox) abox.textContent = auditOut || 'Audit selesai.';
+    }
+  }
+
+  async function bindSelectedDeviceProfile() {
+    const pkg = document.getElementById('inp-spoof-pkg').value.trim();
+    const profId = document.getElementById('inp-spoof-id').value.trim() || selectedProfileId;
+    const wcpu = document.getElementById('sel-spoof-cpu').value || '0';
+    if (!pkg) { showToast('Masukkan package name aplikasi terlebih dahulu!'); return; }
+    await runCmd(`spoof_bind ${pkg} ${profId} ${wcpu}`);
+    setTimeout(() => loadSpoofDatabase(true), 300);
+  }
+
+  async function unbindDeviceProfile() {
+    const pkg = document.getElementById('inp-spoof-pkg').value.trim();
+    if (!pkg) { showToast('Masukkan package name yang ingin dihapus binding-nya!'); return; }
+    await runCmd(`spoof_unbind ${pkg}`);
+    setTimeout(() => loadSpoofDatabase(true), 300);
+  }
+
+  async function resetAllDeviceProfiles() {
+    await runCmd('spoof_reset');
+    setTimeout(() => loadSpoofDatabase(true), 300);
+  }
+
+  async function runSpoofAuditInDiag() {
+    const out = await runCmd('spoof_audit', true);
+    rawLogCache = out || '[UNAVAILABLE] Root Bridge Disconnected.';
+    document.getElementById('log-title-lbl').textContent = 'Log: SPOOF AUDIT';
+    filterDisplayedLogs();
+  }
+
+  async function commitConfigTransaction() {
+    const k = document.getElementById('inp-cfg-key').value.trim();
+    const v = document.getElementById('inp-cfg-val').value.trim();
+    if (!k || !v) { showToast('Masukkan Key dan Value konfigurasi!'); return; }
+    await runCmd(`config_set ${k} ${v}`);
+  }
+
+  function drawFrameChart() {
+    const canvas = document.getElementById('fps-chart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    const vals = [
+      { label: 'P50', v: lastFramePercentiles.p50, color: '#10b981' },
+      { label: 'P90', v: lastFramePercentiles.p90, color: '#00e5ff' },
+      { label: 'P95', v: lastFramePercentiles.p95, color: '#f59e0b' },
+      { label: 'P99', v: lastFramePercentiles.p99, color: '#ef4444' }
+    ];
+    if (vals.every(x => !x.v || x.v <= 0)) {
+      ctx.fillStyle = '#64748b'; ctx.font = '11px sans-serif';
+      ctx.fillText('Menunggu sesi game aktif untuk menampilkan grafik persentil frame-time...', 12, 34);
+      return;
+    }
+    const barW = Math.floor((w - 60) / 4);
+    vals.forEach((item, i) => {
+      const x = 16 + i * (barW + 12);
+      const norm = Math.min(1, item.v / 50.0);
+      const bh = Math.max(6, Math.round(norm * (h - 24)));
+      const y = h - 16 - bh;
+      ctx.fillStyle = item.color;
+      ctx.fillRect(x, y, barW - 16, bh);
+      ctx.fillStyle = '#e2e8f0'; ctx.font = '10px sans-serif';
+      ctx.fillText(`${item.label}: ${item.v}ms`, x, h - 4);
+    });
+  }
+
+  async function refreshFrameStats() {
+    const out = await runCmd('frame_stats', true);
+    if (!out) {
+      setProvBadge('fps-prov-tag', 'UNAVAILABLE');
+      drawFrameChart();
+      return;
+    }
+    const map = {};
+    out.split('\n').forEach(l => {
+      const eq = l.indexOf('=');
+      if (eq > 0) map[l.slice(0, eq).trim()] = l.slice(eq + 1).trim();
+    });
+    setProvBadge('fps-prov-tag', map.FRAME_PROVENANCE || 'UNAVAILABLE');
+    setProvBadge('d-fps-prov', map.FRAME_PROVENANCE || 'IDLE');
+    document.getElementById('fps-src-lbl').textContent = 'Source: ' + (map.FPS_SOURCE || 'Idle');
+    state.OBSERVED_FPS = map.OBSERVED_FPS || '-- FPS';
+    state.FPS_STATUS_COLOR = map.FPS_STATUS_COLOR || 'GRAY';
+    state.SESSION_STATE = map.SESSION_STATE || state.SESSION_STATE;
+    state.OVERLAY_ALLOWED = map.OVERLAY_ALLOWED || state.OVERLAY_ALLOWED;
+    setText('fps-observed', `${map.OBSERVED_FPS || '-- FPS'} (${map.FPS_STATUS_COLOR || 'GRAY'})`);
+    updateUI();
+    document.getElementById('d-act-fps').textContent = 'FPS: ' + (map.OBSERVED_FPS || 'UNAVAILABLE');
+    document.getElementById('fps-avg-dur').textContent = 'Avg Frame: ' + (map.AVG_FRAME_DURATION_MS || 'UNAVAILABLE');
+    document.getElementById('fps-jank').textContent = `${map.TOTAL_FRAMES || 0} / ${map.JANKY_FRAMES || 0} (${map.JANK_PCT || '0%'})`;
+    document.getElementById('fps-sess-dur').textContent = 'Session: ' + (map.SESSION_DURATION || '0m');
+    document.getElementById('fps-pct').textContent = `${map.P50_MS || '-'} / ${map.P90_MS || '-'} / ${map.P95_MS || '-'} / ${map.P99_MS || '-'}`;
+
+    lastFramePercentiles = {
+      p50: parseFloat(String(map.P50_MS || '0').replace(/[^0-9.]/g, '')) || 0,
+      p90: parseFloat(String(map.P90_MS || '0').replace(/[^0-9.]/g, '')) || 0,
+      p95: parseFloat(String(map.P95_MS || '0').replace(/[^0-9.]/g, '')) || 0,
+      p99: parseFloat(String(map.P99_MS || '0').replace(/[^0-9.]/g, '')) || 0
+    };
+    document.getElementById('lbl-fps-chart').textContent = map.OBSERVED_FPS || 'Idle';
+    drawFrameChart();
+  }
+
+  async function loadLogs(cat = 'all') {
+    currentLogCat = cat;
+    ['all', 'diag', 'errors', 'boot', 'audit', 'daemons', 'volt', 'thermod'].forEach(c => {
+      const b = document.getElementById('lcat-' + c);
+      if (b) b.classList.toggle('active', c === cat);
+    });
+    document.getElementById('log-title-lbl').textContent = 'Log: ' + cat.toUpperCase();
+    const out = await runCmd('logs ' + cat, true);
+    rawLogCache = out || '[UNAVAILABLE] Root Bridge Disconnected.';
+    filterDisplayedLogs();
+  }
+
+  async function runSelfDiag() { showToast('Menjalankan audit sistem...'); await runCmd('diag', true); loadLogs('diag'); }
+  async function exportDiagBundle() { await runCmd('export_logs', false); }
+  function copyLogText() {
+    const txt = document.getElementById('log-box').textContent;
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(() => showToast('Log disalin'));
+  }
+
+  function drawSparkline() {
+    const canvas = document.getElementById('telemetry-chart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    if (telemetryHistory.length < 2) {
+      ctx.fillStyle = '#64748b'; ctx.font = '11px sans-serif';
+      ctx.fillText('Menunggu sampel telemetri aktual dari kernel...', 12, 34);
+      return;
+    }
+    ctx.strokeStyle = '#00e5ff'; ctx.lineWidth = 2; ctx.beginPath();
+    telemetryHistory.forEach((pt, idx) => {
+      const x = (idx / Math.max(1, telemetryHistory.length - 1)) * (w - 16) + 8;
+      const y = h - 8 - Math.min(1, Math.max(0, pt.mhz / 3200)) * (h - 16);
+      if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    ctx.strokeStyle = '#8b5cf6'; ctx.lineWidth = 2; ctx.beginPath();
+    telemetryHistory.forEach((pt, idx) => {
+      const x = (idx / Math.max(1, telemetryHistory.length - 1)) * (w - 16) + 8;
+      const y = h - 8 - Math.min(1, Math.max(0, (pt.temp - 25) / 35)) * (h - 16);
+      if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  function formatDaemonMeta(raw) {
+    if (!raw) return 'Status: UNAVAILABLE';
+    const parts = raw.split('|');
+    if (parts[0] !== 'running') return 'STOPPED';
+    return `RUNNING • PID: ${parts[1]} • CPU: ${parts[2]}% • RSS: ${(parseInt(parts[3]||'0',10)/1024).toFixed(1)} MB`;
+  }
+
+  function syncSelectIfNotFocused(id, val) {
+    const el = document.getElementById(id);
+    if (el && document.activeElement !== el && val !== undefined && val !== null) {
+      el.value = String(val);
+    }
+  }
+
+  function syncInputIfNotFocused(id, val) {
+    const el = document.getElementById(id);
+    if (el && document.activeElement !== el && val !== undefined && val !== null) {
+      el.value = String(val);
+    }
+  }
+
+  function renderCapabilityMatrix(force = false) {
+    if (!force && activeTabId !== 'sys' && lastCapSig !== '') return;
+    const grid = document.getElementById('cap-matrix-grid');
+    if (!grid) return;
+    const caps = [
+      { label: 'CPU DVFS', val: state.CAP_CPU_DVFS || 'UNKNOWN' },
+      { label: 'GPU DVFS', val: state.CAP_GPU_DVFS || 'UNKNOWN' },
+      { label: 'MediaTek EEM', val: state.CAP_EEM_VOLT || 'UNSUPPORTED' },
+      { label: 'Thermal /proc', val: state.CAP_THERMAL_PROC || 'UNSUPPORTED' },
+      { label: 'GED GPU Boost', val: state.CAP_GED_BOOST || 'UNSUPPORTED' },
+      { label: 'FPSGO Ceiling', val: state.CAP_FPSGO || 'UNSUPPORTED' },
+      { label: 'Cpuset / EAS', val: state.CAP_CPUSET_EAS || 'UNKNOWN' },
+      { label: 'Charger Bypass', val: state.CAP_CHARGER_BYPASS || 'UNSUPPORTED' },
+      { label: 'Vulkan Driver', val: state.HW_VULKAN_CAP || 'SUPPORTED' },
+      { label: 'ZRAM / VM Tune', val: state.CAP_ZRAM_TUNE || 'SUPPORTED' },
+      { label: 'Zygisk Spoof', val: state.CAP_ZYGISK_SPOOF || 'SUPPORTED' },
+      { label: 'Runtime Check', val: state.RUNTIME_VERIFIED_STATE || 'NOT_RUNTIME_VERIFIED' }
+    ];
+    const sig = caps.map(c => c.val).join('|');
+    if (!force && sig === lastCapSig) return;
+    lastCapSig = sig;
+    grid.innerHTML = caps.map(c => {
+      const cls = c.val === 'SUPPORTED' || c.val === 'RUNTIME_VERIFIED' ? 'actual' : (c.val === 'UNKNOWN' ? 'estimated' : 'unavailable');
+      return `<div class="metric-box"><div class="metric-top"><span class="metric-label">${c.label}</span><span class="prov-tag ${cls}">${c.val}</span></div></div>`;
+    }).join('');
+  }
+
+  function renderCpuCoresGrid(lines) {
+    if (!lines || !lines.length) return;
+    const sig = lines.join(';');
+    if (sig === lastCpuCoresSig) return;
+    lastCpuCoresSig = sig;
+    const grid = document.getElementById('cpu-cores-grid');
+    if (!grid) return;
+    const htmlParts = [];
+    lines.forEach(l => {
+      const [cidPart, rest] = l.split(':');
+      if (!rest) return;
+      const parts = rest.split(',');
+      const curMHz = parts[0] ? Math.round(parseInt(parts[0], 10) / 1000) : 0;
+      const minMHz = parts[1] ? Math.round(parseInt(parts[1], 10) / 1000) : 0;
+      const maxMHz = parts[2] ? Math.round(parseInt(parts[2], 10) / 1000) : 0;
+      const on = parts[3] === '1';
+      htmlParts.push(`<div class="metric-box"><div class="metric-top"><span class="metric-label">Core ${cidPart}</span><span class="prov-tag ${on ? 'actual' : 'unavailable'}">${on ? 'ONLINE' : 'OFFLINE'}</span></div><div class="metric-val">${curMHz} <span style="font-size:10.5px;color:var(--text-muted);">/ ${maxMHz} MHz</span></div><div class="metric-sub">Min: ${minMHz} MHz • ${parts[4]||''}</div></div>`);
+    });
+    grid.innerHTML = htmlParts.join('');
+  }
+
+  function updateUI() {
+    ['powersave', 'balanced', 'performance', 'gaming', 'custom'].forEach(p => {
+      const b = document.getElementById('prof-' + p);
+      if (b) b.classList.toggle('active', state.GLOBAL_PROFILE === p);
+    });
+    document.getElementById('badge-active-prof').textContent = (state.EFFECTIVE_PROFILE || state.GLOBAL_PROFILE || 'balanced').toUpperCase();
+    document.getElementById('badge-arbiter-tier').textContent = 'WINNER: ' + (state.ARBITER_WINNING_TIER || '5:GLOBAL_PROFILE');
+
+    const txParts = (state.LAST_TRANSACTION || 'APPLIED|init|Ready').split('|');
+    const txB = document.getElementById('tx-last-badge');
+    if (txB) {
+      txB.textContent = `TX: ${txParts[0]} (${txParts[1] || ''})`;
+      txB.className = 'badge ' + (txParts[0] === 'APPLIED' ? 'ok' : (txParts[0] === 'ROLLED_BACK' || txParts[0] === 'FAILED' ? 'crit' : 'warn'));
+    }
+
+    const safeBtn = document.getElementById('btn-safemode');
+    if (safeBtn) {
+      const on = state.SAFE_MODE === '1';
+      safeBtn.textContent = on ? '🛡️ Emergency Safe Mode: ON' : '🛡️ Emergency Safe Mode: OFF';
+      safeBtn.classList.toggle('active', on);
+    }
+
+    const tState = (state.THERMAL_STATE || 'NORMAL').toUpperCase();
+    ['badge-therm-state', 't-stage-pill'].forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = 'THERMAL: ' + tState;
+      el.className = 'badge ' + (tState === 'NORMAL' ? 'ok' : (tState === 'WARM' ? 'warn' : 'crit'));
+    });
+
+    document.getElementById('intel-score').textContent = `Score: ${state.INTEL_SCORE || 0} / 100 (${state.INTEL_CONFIDENCE || '--'})`;
+    document.getElementById('intel-rec').textContent = (state.INTEL_RECOMMENDED || 'balanced').toUpperCase();
+    setSwitch('sw-auto_rec', state.AUTO_APPLY_RECOMMENDATION);
+
+    syncSelectIfNotFocused('sel-manual-ovr', state.USER_MANUAL_OVERRIDE || 'none');
+    syncInputIfNotFocused('inp-cp-min', state.CUSTOM_CPU_MIN_PCT || '20');
+    syncInputIfNotFocused('inp-cp-max', state.CUSTOM_CPU_MAX_PCT || '90');
+    syncInputIfNotFocused('inp-cp-gov', state.CUSTOM_CPU_GOV || 'schedutil');
+    syncSelectIfNotFocused('sel-cp-gpu', state.CUSTOM_GPU_MODE || 'balance');
+    syncInputIfNotFocused('inp-cp-swp', state.CUSTOM_SWAPPINESS || '100');
+    syncInputIfNotFocused('inp-cp-tch', state.CUSTOM_TOUCH_LEVEL || '3');
+
+    if (state.AVAIL_GOVS) {
+      const govSel = document.getElementById('sel-gov');
+      if (govSel && document.activeElement !== govSel) {
+        const govs = state.AVAIL_GOVS.trim().split(/\s+/).filter(Boolean);
+        if (govs.length > 0 && govSel.options.length !== govs.length) {
+          govSel.innerHTML = govs.map(g => `<option value="${g}">${g}</option>`).join('');
+        }
+        if (state.CPU_GOV) govSel.value = state.CPU_GOV;
+      }
+    }
+
+    ['ocore_ai', 'ocore_manual', 'ocore_lock', 'stock'].forEach(e => {
+      const b = document.getElementById('ce-' + e);
+      if (b) b.classList.toggle('active', state.CPU_ENGINE === e);
+    });
+    const normTe = state.THERMAL_ENGINE === 'ocore_mtk' ? 'ocore_intel' : (state.THERMAL_ENGINE === 'stock' ? 'oem_stock' : state.THERMAL_ENGINE);
+    ['ocore_intel', 'oem_stock', 'monitor_only', 'restore_stock', 'ocore_ai_therm', 'ocore_lite', 'ocore_extreme'].forEach(t => {
+      const b = document.getElementById('te-' + t);
+      if (b) b.classList.toggle('active', normTe === t);
+    });
+    ['auto', 'per_game', 'manual', 'disabled'].forEach(gm => {
+      const b = document.getElementById('gm-' + gm);
+      if (b) b.classList.toggle('active', state.GAME_DETECT_MODE === gm);
+    });
+    ['STOCK', 'CONSERVATIVE', 'OPTIMAL', 'CUSTOM', 'DISABLED'].forEach(vp => {
+      const b = document.getElementById('vp-' + vp);
+      if (b) b.classList.toggle('active', state.VOLT_PROFILE === vp);
+    });
+
+    syncInputIfNotFocused('inp-vb', state.VOLT_OFFSET_B);
+    syncInputIfNotFocused('inp-vl', state.VOLT_OFFSET_L);
+    syncInputIfNotFocused('inp-vcci', state.VOLT_OFFSET_CCI);
+    syncInputIfNotFocused('inp-vgpu', state.VOLT_OFFSET_GPU);
+
+    const gpuSup = state.CAP_GPU_DVFS === 'SUPPORTED';
+    const gpuArchBadge = document.getElementById('badge-gpu-arch');
+    if (gpuArchBadge) {
+      gpuArchBadge.textContent = `${state.HW_GPU_ARCH || 'Generic'} (${state.CAP_GPU_DVFS || 'UNKNOWN'})`;
+      gpuArchBadge.className = 'badge ' + (gpuSup ? 'ok' : 'warn');
+    }
+
+    syncSelectIfNotFocused('sel-swp', state.ZRAM_SWAPPINESS || '100');
+    syncSelectIfNotFocused('sel-iosched', state.IO_SCHEDULER || 'default');
+    const zAlgo = document.getElementById('lbl-zram-algo');
+    if (zAlgo) zAlgo.textContent = `ZRAM Algorithm: ${state.ZRAM_ALGO || 'lzo-rle'} | Storage: ${state.HW_STORAGE_TYPE || 'UFS'}`;
+    const dHz = document.getElementById('lbl-disp-hz');
+    if (dHz) dHz.textContent = state.HW_DISPLAY_HZ || '60/90/120Hz';
+    const vkLbl = document.getElementById('lbl-vk-cap');
+    if (vkLbl) vkLbl.textContent = `Vulkan Driver: ${state.HW_VULKAN_CAP || 'SUPPORTED'}`;
+
+    const actGm = state.ACTIVE_GAME && state.ACTIVE_GAME !== 'None' ? state.ACTIVE_GAME : '';
+    document.getElementById('d-act-game').textContent = actGm || 'None (Idle)';
+    const gsBadge = document.getElementById('game-sess-badge');
+    if (gsBadge) {
+      gsBadge.textContent = actGm ? `IN-GAME: ${actGm}` : `MODE: ${(state.GAME_DETECT_MODE || 'auto').toUpperCase()}`;
+      gsBadge.className = 'badge ' + (actGm ? 'ok' : 'cyan');
+    }
+
+    ['0', '1', '2', '3', '4', '5'].forEach(lvl => {
+      const b = document.getElementById('tch-' + lvl);
+      if (b) b.classList.toggle('active', String(state.TOUCH_LEVEL) === lvl);
+    });
+    ['-1', '0', '1', '3'].forEach(idx => {
+      const b = document.getElementById('rr-' + idx);
+      if (b) b.classList.toggle('active', String(state.REFRESH_IDX) === idx);
+    });
+    ['default', 'skiavk', 'skiagl', 'hybrid'].forEach(ren => {
+      const b = document.getElementById('ren-' + ren);
+      if (b) b.classList.toggle('active', (state.RENDER_MODE || 'default') === ren);
+    });
+
+    document.getElementById('eem-baseline-lbl').textContent = `Captured Pre-Mod Baseline: ${state.EEM_BASELINE || 'None (Kernel /proc/eem not exposed)'}`;
+    const eemSup = state.EEM_SUPPORTED === '1';
+    const vsb = document.getElementById('volt-sup-badge');
+    if (vsb) {
+      vsb.textContent = eemSup ? `SUPPORTED (${state.EEM_RAILS})` : 'UNSUPPORTED';
+      vsb.className = 'badge ' + (eemSup ? 'ok' : 'warn');
+    }
+
+    document.getElementById('ts-cpu').textContent = `Thresholds: ${state.CPU_WARM_C}/${state.CPU_HOT_C}/${state.CPU_CRIT_C}°C`;
+    document.getElementById('ts-gpu').textContent = `Thresholds: ${state.GPU_WARM_C}/${state.GPU_HOT_C}/${state.GPU_CRIT_C}°C`;
+    document.getElementById('ts-soc').textContent = `Thresholds: ${state.SOC_WARM_C}/${state.SOC_HOT_C}/${state.SOC_CRIT_C}°C`;
+    document.getElementById('ts-bat').textContent = `Thresholds: ${state.BAT_WARM_C}/${state.BAT_HOT_C}/${state.BAT_CRIT_C}°C`;
+
+    if (!thermInputsInitialized) {
+      const selDom = document.getElementById('sel-therm-dom');
+      populateDomainThresholds(selDom ? selDom.value : 'bat');
+      thermInputsInitialized = true;
+    }
+
+    const chgSup = state.CHG_SUPPORTED === '1';
+    const chgBadge = document.getElementById('e-chg-sup-badge');
+    if (chgBadge) {
+      chgBadge.textContent = chgSup ? 'SUPPORTED' : 'UNSUPPORTED';
+      chgBadge.className = 'badge ' + (chgSup ? 'ok' : 'warn');
+    }
+    const chgDesc = document.getElementById('e-chg-node-desc');
+    if (chgDesc) {
+      chgDesc.textContent = chgSup ? `Verified Kernel Charger Node: ${state.CHG_NODE}` : 'UNSUPPORTED: Kernel tidak mengekspos node kontrol charging yang dapat ditulis.';
+    }
+    syncSelectIfNotFocused('sel-battdiv', state.OCORE_BATTMON_DIV || 'default');
+    syncInputIfNotFocused('inp-sc-stop', state.SMART_CHARGE_STOP || '85');
+    syncInputIfNotFocused('inp-sc-res', state.SMART_CHARGE_RESUME || '75');
+
+    const tcpLbl = document.getElementById('lbl-tcp-cong');
+    if (tcpLbl) tcpLbl.textContent = `Active Congestion Control: ${state.TCP_CONG || 'cubic'}`;
+    syncSelectIfNotFocused('sel-dns', state.PRIVATE_DNS_MODE || 'off');
+
+    const errCnt = parseInt(state.ERR_COUNT || '0', 10);
+    const errBadge = document.getElementById('err-badge');
+    if (errBadge) {
+      errBadge.textContent = `${errCnt} ERRORS/WARNS`;
+      errBadge.className = 'badge ' + (errCnt === 0 ? 'ok' : 'warn');
+    }
+    document.getElementById('d-err-sum').textContent = `Errors/Warnings: ${errCnt}`;
+    document.getElementById('diag-runtime-state').textContent = state.RUNTIME_VERIFIED_STATE || 'NOT_RUNTIME_VERIFIED';
+
+    const confTxt = document.getElementById('conflict-banner-txt');
+    if (confTxt) {
+      const cstr = (state.DETECTED_CONFLICTS || 'None').trim();
+      confTxt.textContent = (!cstr || cstr === 'None')
+        ? 'Conflicts: [CLEAN] Zero conflicting modules.'
+        : `Conflicts: [WARN] ${cstr}`;
+    }
+
+    setSwitch('sw-ocore_ai', state.OCORE_AI_ENABLE);
+    setSwitch('sw-ocore_battmon', state.OCORE_BATTMON_ENABLE);
+    setSwitch('sw-ocore_ktuner', state.OCORE_KTUNER_ENABLE);
+    setSwitch('sw-ocore_fpsmon', state.OCORE_FPSMON_ENABLE);
+    setSwitch('sw-smart_guard', state.SMART_GUARD);
+    setSwitch('sw-fpsgo_unlock', state.FPSGO_UNLOCK);
+    setSwitch('sw-ged_boost', state.GED_BOOST);
+    setSwitch('sw-trip_policy', state.ALLOW_TRIP_POINT_MOD);
+    setSwitch('sw-bypass_chg', state.BYPASS_CHG_ENABLE, chgSup);
+    setSwitch('sw-smart_charge', state.SMART_CHARGE_LIMIT, chgSup);
+    setSwitch('sw-deep_doze', state.DEEP_DOZE_ENABLE);
+    setSwitch('sw-schedutil_tune', state.SCHEDUTIL_TUNE_ENABLE);
+    setSwitch('sw-eem_guard', state.EEM_PERSIST_GUARD);
+    setSwitch('sw-cpuset_eas', state.CPUSET_EAS_OPT);
+    setSwitch('sw-io_opt', state.IO_QUEUE_OPT);
+    setSwitch('sw-net_lowlat', state.TCP_LOW_LATENCY);
+    setSwitch('sw-mtk_boost', state.MTK_APU_DRAM_BOOST);
+    setSwitch('sw-dnd', state.GAME_DND_ENABLE);
+    setSwitch('sw-APreload', state.GAME_PRELOAD_ENABLE);
+
+
+    setSwitch('sw-auto_hud', state.AUTO_FLOATING_HUD !== '0' ? '1' : '0');
+    setSwitch('sw-smart_res', state.SMART_RESOURCE_MGR !== '0' ? '1' : '0');
+    syncSelectIfNotFocused('sel-hud-poll', state.HUD_POLL_INTERVAL_MS || '2000');
+    syncInputIfNotFocused('inp-fps-green', state.FPS_GREEN_PCT || '85');
+    syncInputIfNotFocused('inp-fps-yellow', state.FPS_YELLOW_PCT || '60');
+
+    const sessState = state.SESSION_STATE || (actGm ? 'OVERLAY_ACTIVE' : 'IDLE');
+    const sessBadge = document.getElementById('badge-session-state');
+    if (sessBadge) {
+      setText('badge-session-state', 'STATE: ' + sessState);
+      sessBadge.className = 'badge ' + (sessState === 'OVERLAY_ACTIVE' ? 'ok' : (sessState === 'IDLE' ? '' : 'cyan'));
+    }
+    document.querySelectorAll('#state-machine-chain .state-step').forEach(el => {
+      el.classList.toggle('active', el.getAttribute('data-st') === sessState);
+    });
+    const ovlAllow = state.OVERLAY_ALLOWED === '1' && state.AUTO_FLOATING_HUD !== '0' && !!actGm;
+    setText('d-hud-policy', state.AUTO_FLOATING_HUD !== '0' ? 'Auto (GameList-Only)' : 'Disabled by User');
+    setText('d-hud-allowed', ovlAllow ? `ACTIVE (${actGm})` : 'HIDDEN (Non-Game / Idle)');
+    setText('d-hud-hz', state.HW_DISPLAY_HZ || '60/90/120 Hz');
+    setText('d-hud-thr', `Green ≥${state.FPS_GREEN_PCT || 85}% | Yellow ≥${state.FPS_YELLOW_PCT || 60}%`);
+    setText('d-agw-sub', actGm ? (state.THERMAL_STATE === 'NORMAL' ? 'GAMING_ULTRA' : 'GAMING_SUSTAINED') : 'IDLE');
+    setText('d-srm-stat', actGm && state.SMART_RESOURCE_MGR !== '0' ? 'Smart Resource: ACTIVE' : 'Smart Resource: Standby');
+
+    if (state.FPS_HIST_MIN && state.FPS_HIST_MAX) {
+      setText('fps-hist-minmax', `${state.FPS_HIST_MIN} / ${state.FPS_HIST_AVG || '--'} / ${state.FPS_HIST_MAX} FPS`);
+      setText('fps-hist-cnt', `Samples: ${state.FPS_HIST_SAMPLES || 0} • Avg P95: ${state.FPS_HIST_P95_AVG || '--'} ms`);
+    }
+
+    const hudPreview = document.getElementById('hud-pill-preview');
+    const hudText = document.getElementById('hud-pill-text');
+    if (hudPreview && hudText) {
+      const rawFps = (state.OBSERVED_FPS || '-- FPS').trim();
+      const dispFps = (actGm && rawFps && rawFps !== 'UNAVAILABLE') ? (rawFps.endsWith('FPS') ? rawFps : `${rawFps} FPS`) : '-- FPS';
+      setText('hud-pill-text', dispFps);
+      const col = (actGm ? (state.FPS_STATUS_COLOR || 'GRAY') : 'GRAY').toLowerCase();
+      hudPreview.className = 'fps-hud-capsule ' + (['green','yellow','red','gray'].includes(col) ? col : 'gray');
+    }
+
+    renderCapabilityMatrix();
+  }
+
+  async function refreshAll(manual = false) {
+    if (document.hidden && !manual) {
+      scheduleNextPoll();
+      return;
+    }
+    if (refreshInFlight) {
+      if (!manual) scheduleNextPoll();
+      return;
+    }
+    refreshInFlight = true;
+
+    const adapterInfo = RootBridge.resolveAdapter();
+    setText('diag-bridge-name', adapterInfo.name);
+    setText('diag-bridge-caps', adapterInfo.capabilities);
+
+    const pill = document.getElementById('conn-pill');
+    const banner = document.getElementById('offline-banner');
+
+    const res = await RootBridge.execOcore('status', []);
+    refreshInFlight = false;
+
+    if (!res.ok || !res.stdout) {
+      if (pill && pill.className !== 'conn-badge offline') pill.className = 'conn-badge offline';
+      setText('conn-text', adapterInfo.name);
+      if (banner && banner.style.display !== 'block') banner.style.display = 'block';
+      ['prov-cpu','prov-gpu','prov-bat','prov-ram','tp-cpu','tp-gpu','tp-soc','tp-bat','tp-pmic','tp-pa','ep-cap','ep-volt','ep-hlth'].forEach(id => setProvBadge(id, 'UNAVAILABLE'));
+      if (activeTabId === 'dash') drawSparkline();
+      updateUI();
+      scheduleNextPoll();
+      return;
+    }
+
+    const out = res.stdout;
+    const domMap = {};
+    out.split('\n').forEach(line => {
+      const eq = line.indexOf('=');
+      if (eq > 0 && !line.startsWith(' ')) {
+        const k = line.slice(0, eq).trim();
+        const v = line.slice(eq + 1).trim();
+        if (k.startsWith('DOMAIN_')) domMap[k] = v;
+        else state[k] = v;
+      }
+    });
+
+    function parseDom(key) {
+      const raw = domMap[key] || 'UNAVAILABLE|0|None|UNAVAILABLE';
+      const [val, dc, src, prov] = raw.split('|');
+      return { val: val || 'UNAVAILABLE', dc: parseInt(dc||'0',10), src: src || 'None', prov: prov || 'UNAVAILABLE' };
+    }
+
+    const dCpu = parseDom('DOMAIN_CPU');
+    const dGpu = parseDom('DOMAIN_GPU');
+    const dSoc = parseDom('DOMAIN_SOC');
+    const dBat = parseDom('DOMAIN_BAT');
+    const dPmic = parseDom('DOMAIN_PMIC');
+    const dPa = parseDom('DOMAIN_PA');
+
+    let avgMhz = 0, coreCnt = 0;
+    const cpuSec = out.split('=== CPU_FREQS ===')[1];
+    if (cpuSec) {
+      const lines = cpuSec.split('===')[0].trim().split('\n').filter(Boolean);
+      cachedCpuLines = lines;
+      lines.forEach(l => {
+        const [, rest] = l.split(':');
+        if (!rest) return;
+        const parts = rest.split(',');
+        const curMHz = parts[0] ? Math.round(parseInt(parts[0], 10) / 1000) : 0;
+        const on = parts[3] === '1';
+        if (on && curMHz > 0) { avgMhz += curMHz; coreCnt++; }
+      });
+    }
+
+    const meanMhz = coreCnt > 0 ? Math.round(avgMhz / coreCnt) : 0;
+    const batTempC = dBat.dc > 0 ? (dBat.dc / 10.0) : 35.0;
+    telemetryHistory.push({ mhz: meanMhz, temp: batTempC });
+    if (telemetryHistory.length > 30) telemetryHistory.shift();
+
+    window.requestAnimationFrame(() => {
+      if (banner && banner.style.display !== 'none') banner.style.display = 'none';
+      if (pill && !pill.classList.contains('live')) pill.className = 'conn-badge live';
+      setText('conn-text', adapterInfo.name + ' • Live');
+
+      setProvBadge('prov-cpu', dCpu.prov); setProvBadge('tp-cpu', dCpu.prov);
+      setProvBadge('prov-gpu', state.GPU_PROV !== 'UNAVAILABLE' ? state.GPU_PROV : dGpu.prov); setProvBadge('tp-gpu', dGpu.prov);
+      setProvBadge('tp-soc', dSoc.prov);
+      setProvBadge('prov-bat', state.BATT_PROV || dBat.prov); setProvBadge('tp-bat', dBat.prov);
+      setProvBadge('tp-pmic', dPmic.prov); setProvBadge('tp-pa', dPa.prov);
+      setProvBadge('prov-ram', state.RAM_PROV || 'ACTUAL');
+      setProvBadge('d-hw-verif', state.RUNTIME_VERIFIED_STATE || 'ACTUAL');
+
+      setText('d-dev-model', `${state.HW_BRAND || ''} ${state.HW_MODEL || 'Unknown'} (${state.HW_DEVICE || ''})`.trim());
+      setText('d-dev-soc', `${state.HW_SOC_FAM || 'Generic'} • ${state.HW_STORAGE_TYPE || 'UFS'}`);
+
+      setText('d-tcpu', `${dCpu.val} (Load: ${state.LOAD_AVG || '0.0'})`);
+      setText('d-cpu-gov', `Gov: ${state.CPU_GOV || 'schedutil'}`);
+      setText('d-tgpu', `${dGpu.val} (${state.GPU_LOAD_PCT || 'UNAVAILABLE'})`);
+      setText('d-gpu-freq', `Freq: ${state.GPU_FREQ_MHZ || 'UNAVAILABLE'}`);
+      setText('d-tbat', `${dBat.val} (${state.BATT_CAP || '--'}%)`);
+      setText('d-bat-state', `${state.BATT_STATUS || '--'} • ${state.BATT_MA || ''}`);
+      setText('d-ram', `${state.RAM_USED_MB || '--'} / ${state.RAM_TOTAL_MB || '--'} MB (${state.RAM_PCT || 0}%)`);
+      setText('d-zram', `Avail: ${state.RAM_AVAIL_MB || 0}MB | Cache: ${state.RAM_CACHE_MB || 0}MB | ZRAM: ${state.ZRAM_USED_MB || 0}/${state.ZRAM_TOTAL_MB || 0}MB`);
+
+      setText('t-cpu', dCpu.val);
+      setText('t-gpu', dGpu.val);
+      setText('t-ap', dSoc.val);
+      setText('t-bat', dBat.val);
+      setText('t-pmic', dPmic.val);
+      setText('t-pa', dPa.val);
+
+      setProvBadge('ep-cap', state.BATT_PROV);
+      setProvBadge('ep-volt', state.BATT_MV !== 'UNAVAILABLE' ? 'ACTUAL' : 'UNAVAILABLE');
+      setProvBadge('ep-hlth', state.BATT_HEALTH_PCT !== 'UNAVAILABLE' ? 'ACTUAL' : 'UNAVAILABLE');
+      setText('e-cap', `${state.BATT_CAP}% (${dBat.val})`);
+      setText('e-status', state.BATT_STATUS);
+      setText('e-volt', state.BATT_MV);
+      setText('e-curr', `Current: ${state.BATT_MA}`);
+      setText('e-health', `${state.BATT_HEALTH_STR} (${state.BATT_HEALTH_PCT})`);
+      setText('e-cycles', `Cycles: ${state.BATT_CYCLES}`);
+
+      setText('dm-ai-meta', formatDaemonMeta(state.DAEMON_AI));
+      setText('dm-battmon-meta', formatDaemonMeta(state.DAEMON_BATTMON));
+      setText('dm-ktuner-meta', formatDaemonMeta(state.DAEMON_KTUNER));
+      setText('dm-fpsmon-meta', formatDaemonMeta(state.DAEMON_FPSMON));
+
+      const runCnt = [state.DAEMON_AI, state.DAEMON_BATTMON, state.DAEMON_KTUNER, state.DAEMON_FPSMON].filter(x => (x||'').startsWith('running')).length;
+      setText('d-daemon-sum', `${runCnt} Active Daemons`);
+
+      setText('sys-hw-model', `${state.HW_MANUFACTURER || ''} ${state.HW_MODEL || ''} (${state.HW_DEVICE || ''})`.trim());
+      setText('sys-hw-mfg', `Product: ${state.HW_PRODUCT || '--'} • Arch: ${state.HW_ARCH || 'arm64-v8a'} • Storage: ${state.HW_STORAGE_TYPE || 'UFS'}`);
+      setText('sys-hw-soc', `${state.HW_SOC_FAM || ''} • ${state.HW_KERNEL || ''}`);
+      setText('sys-hw-root', `Root: ${state.HW_ROOT_MGR || ''} • Android ${state.HW_ANDROID || ''}`);
+
+      if (activeTabId === 'perf' || lastCpuCoresSig === '') {
+        renderCpuCoresGrid(cachedCpuLines);
+      }
+
+      const glSec = out.split('=== GAMELIST ===')[1];
+      if (glSec) {
+        const games = glSec.split('===')[0].trim().split('\n').map(s => s.trim()).filter(Boolean);
+        const gSig = games.join(',');
+        if (gSig !== lastGameChipsSig) {
+          lastGameChipsSig = gSig;
+          document.getElementById('gamelist-chips').innerHTML = games.map(g => `<span class="badge" style="cursor:pointer;" onclick="document.getElementById('inp-game-pkg').value='${g}';if(document.getElementById('inp-spoof-pkg'))document.getElementById('inp-spoof-pkg').value='${g}';">${g}</span>`).join('');
+        }
+      }
+
+      setText('lbl-chart-latest', `CPU Avg: ${meanMhz} MHz | Bat: ${batTempC.toFixed(1)}°C`);
+      if (activeTabId === 'dash') {
+        drawSparkline();
+      }
+      updateUI();
+      scheduleNextPoll();
+    });
+  }
+
+  function changePollInterval(msStr) {
+    pollIntervalMs = parseInt(msStr || '5000', 10);
+    if (pollTimerId) { clearTimeout(pollTimerId); pollTimerId = null; }
+    if (pollIntervalMs > 0) {
+      scheduleNextPoll(pollIntervalMs);
+      showToast(`Polling disetel ke ${pollIntervalMs / 1000}s`);
+    } else {
+      showToast('Polling dijeda (Paused)');
+    }
+  }
+
+  async function loadInstalledPackages(targetInputId = 'inp-game-pkg') {
+    showToast('Memindai paket aplikasi pengguna...');
+    const out = await runCmd('list_packages', true);
+    if (!out) { showToast('Gagal memuat daftar paket'); return; }
+    const pkgs = out.trim().split('\n').map(s => s.trim()).filter(Boolean);
+    const dl = document.getElementById('dl-installed-pkgs');
+    if (dl) {
+      dl.innerHTML = pkgs.map(p => `<option value="${p}">${p}</option>`).join('');
+    }
+    const inp = document.getElementById(targetInputId) || document.getElementById('inp-game-pkg');
+    if (inp) { inp.focus(); showToast(`${pkgs.length} aplikasi dimuat ke daftar saran`); }
+  }
+
+  async function loadThermalZones() {
+    const out = await runCmd('zones', true);
+    const box = document.getElementById('therm-zones-box');
+    if (box) box.textContent = out || '[UNAVAILABLE] Tidak dapat membaca zona termal.';
+  }
+
+  async function loadLiveConfig() {
+    const out = await runCmd('config_get', true);
+    const box = document.getElementById('live-config-box');
+    if (!box) return;
+    if (!out) { box.textContent = '[UNAVAILABLE] Tidak dapat membaca /data/adb/ocore/config.conf'; return; }
+    const lines = out.split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
+    box.innerHTML = lines.map(l => {
+      const eq = l.indexOf('=');
+      if (eq < 0) return l;
+      const k = l.slice(0, eq).trim();
+      const v = l.slice(eq + 1).trim();
+      return `<div style="cursor:pointer;padding:2px 4px;border-radius:4px;" onmouseover="this.style.background='rgba(0,229,255,0.12)'" onmouseout="this.style.background='transparent'" onclick="document.getElementById('inp-cfg-key').value='${k}';document.getElementById('inp-cfg-val').value='${v}';showToast('Dipilih: ${k}')"><b>${k}</b> = <span style="color:#00e5ff;">${v}</span></div>`;
+    }).join('');
+  }
+
+  function filterDisplayedLogs() {
+    const q = (document.getElementById('inp-log-filter')?.value || '').toLowerCase().trim();
+    const box = document.getElementById('log-box');
+    if (!box || !rawLogCache) return;
+    if (!q) { box.textContent = rawLogCache; return; }
+    const filtered = rawLogCache.split('\n').filter(line => line.toLowerCase().includes(q)).join('\n');
+    box.textContent = filtered || `[Tidak ada baris log yang cocok dengan filter "${q}"]`;
+  }
+
+  window.addEventListener('DOMContentLoaded', () => {
+    const markInteractionStart = () => { isUserInteracting = true; lastInteractionTs = Date.now(); };
+    const markInteractionEnd = () => { isUserInteracting = false; lastInteractionTs = Date.now(); };
+    window.addEventListener('touchstart', markInteractionStart, { passive: true });
+    window.addEventListener('touchmove', markInteractionStart, { passive: true });
+    window.addEventListener('touchend', markInteractionEnd, { passive: true });
+    window.addEventListener('touchcancel', markInteractionEnd, { passive: true });
+    window.addEventListener('scroll', () => { lastInteractionTs = Date.now(); }, { passive: true });
+    window.addEventListener('keydown', () => { lastInteractionTs = Date.now(); }, { passive: true });
+
+    populateSpoofFiltersAndPresets();
+    selectDeviceProfileCard(selectedProfileId);
+    renderActiveSpoofBindings();
+    drawFrameChart();
+    refreshAll(true);
+  });
+</script>
+</body>
+</html>

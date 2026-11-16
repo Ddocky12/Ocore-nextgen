@@ -1,0 +1,3318 @@
+#!/system/bin/sh
+# ==============================================================================
+# Ocore Unified Performance Engine — Master Controller (ocorectl v3.2.0-NextGen)
+# Engineering Revision v3.2.0-NextGen.2 Highlights:
+#   1. 6-Tier Performance Arbiter:
+#        Priority 1: Thermal Protection
+#        Priority 2: Safety Recovery (Safe Mode / Bootloop Guard)
+#        Priority 3: User Manual Override
+#        Priority 4: Gaming Profile (Verified Foreground Game Session)
+#        Priority 5: Global Performance Profile
+#        Priority 6: Background Optimization (Screen-Off / Idle)
+#   2. 7-Step Configuration Transaction Manager:
+#        Backup -> Validate -> Capability Check -> Apply -> Readback Verify -> Commit -> Rollback
+#        Emits: TRANSACTION_STATUS=<APPLIED|PARTIAL|UNSUPPORTED|FAILED|ROLLED_BACK>
+#   3. EEM Stability Framework:
+#        Captures pre-modification initial hardware offsets per rail (never assumes 0 is stock!)
+#        Modes: STOCK (Initial Baseline), CONSERVATIVE (-3/-3/-2/-2), CUSTOM, DISABLED
+#        Per-rail independent validation, readback verification & rollback
+#   4. Frame Stability Intelligence:
+#        Computes P50/P90/P95/P99 frame-time (ms), Jank %, and Frame Duration from dumpsys gfxinfo
+#   5. Ocore Performance Intelligence:
+#        Multi-factor heuristic scoring engine (advisory by default; never mislabels static scripts as AI)
+#   6. Ocore Recovery Center:
+#        Full CLI & WebUI recovery (emergency_safe_mode, bootloop_recovery, config_restore,
+#        kernel_node_restore, thermal_restore, eem_restore, daemon_recovery, diag_export)
+# ==============================================================================
+
+MODDIR="${MODDIR_OVERRIDE:-/data/adb/modules/Ocore}"
+[ ! -d "$MODDIR" ] && MODDIR="/data/adb/modules/Ocore"
+if [ ! -d "$MODDIR" ]; then
+  SCRIPT_DIR="${0%/*}"
+  if [ -f "$SCRIPT_DIR/../../module.prop" ]; then
+    MODDIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+  fi
+fi
+
+OCORE_DIR="${OCORE_DIR_OVERRIDE:-/data/adb/ocore}"
+OCORE_CONF="$OCORE_DIR/config.conf"
+LOG_DIR="$OCORE_DIR/logs"
+STATE_DIR="$OCORE_DIR/state"
+BACKUP_DIR="$OCORE_DIR/backups"
+
+# Structured Log Files
+OCORE_LOG="$LOG_DIR/ocore_events.log"
+BOOT_LOG="$LOG_DIR/boot_trace.log"
+AUDIT_LOG="$LOG_DIR/kernel_nodes_audit.log"
+DAEMON_LOG="$LOG_DIR/daemons_watchdog.log"
+ERROR_LOG="$LOG_DIR/errors.log"
+VOLT_LOG="$LOG_DIR/volt_optimizer.log"
+PERF_HIST_LOG="$LOG_DIR/perf_history.log"
+GAME_SESS_LOG="$LOG_DIR/gaming_sessions.log"
+TX_LOG="$LOG_DIR/transactions.log"
+
+THERMOD_DIR="${THERMOD_DIR_OVERRIDE:-/data/adb/thermod_mt6877}"
+AZ_CONF_DIR="${AZ_CONF_OVERRIDE:-/data/adb/.config/ocore}"
+RR_TMP_DIR="${RR_TMP_OVERRIDE:-/data/local/tmp/ocore}"
+
+if [ ! -d "$STATE_DIR/spoof_bindings" ] || [ ! -d "$RR_TMP_DIR/render" ]; then
+  mkdir -p "$OCORE_DIR/config" "$OCORE_DIR/runtime" "$OCORE_DIR/hw" "$LOG_DIR" "$STATE_DIR/locks" "$STATE_DIR/per_game" "$STATE_DIR/spoof_bindings" "$BACKUP_DIR" "$THERMOD_DIR/logs" \
+    "$MODDIR/backup" "$MODDIR/state" "/data/adb/ocore/state" \
+    "$AZ_CONF_DIR/API" "$AZ_CONF_DIR/debug" "$AZ_CONF_DIR/bypasschgconfig" "$AZ_CONF_DIR/gamelist" \
+    "$RR_TMP_DIR/render" "/data/data/zx.ocore/API" 2>/dev/null
+fi
+
+# Source modular engine subsystems (fast-path for `status` loads memory + gaming/fps engines)
+if [ "${1:-status}" = "status" ]; then
+  [ ! -f "$STATE_DIR/hw_capabilities.env" ] && [ -f "$MODDIR/engine/core/hw_detect.sh" ] && . "$MODDIR/engine/core/hw_detect.sh"
+  [ -f "$MODDIR/engine/core/memory_storage_engine.sh" ] && . "$MODDIR/engine/core/memory_storage_engine.sh"
+  [ -f "$MODDIR/engine/core/gaming_engine.sh" ] && . "$MODDIR/engine/core/gaming_engine.sh"
+else
+  for _mod_sh in \
+    "$MODDIR/engine/core/core_engine.sh" \
+    "$MODDIR/engine/core/hw_detect.sh" \
+    "$MODDIR/engine/core/arbiter.sh" \
+    "$MODDIR/engine/core/cpu_engine.sh" \
+    "$MODDIR/engine/core/gpu_engine.sh" \
+    "$MODDIR/engine/core/thermal_engine.sh" \
+    "$MODDIR/engine/core/voltage_engine.sh" \
+    "$MODDIR/engine/core/gaming_engine.sh" \
+    "$MODDIR/engine/core/device_profile_engine.sh" \
+    "$MODDIR/engine/core/renderer_engine.sh" \
+    "$MODDIR/engine/core/battery_engine.sh" \
+    "$MODDIR/engine/core/memory_storage_engine.sh" \
+    "$MODDIR/engine/core/daemon_manager.sh" \
+    "$MODDIR/engine/core/diagnostics_engine.sh" \
+    "$MODDIR/engine/core/recovery_manager.sh" \
+    "$MODDIR/engine/core/webui_bridge.sh"; do
+    [ -f "$_mod_sh" ] && . "$_mod_sh"
+  done
+fi
+
+
+# ==============================================================================
+# LOGGING & SANITIZATION HELPERS (Scoped Variables — Zero Caller Collisions!)
+# ==============================================================================
+rotate_log_if_needed() {
+  _rl_lf="$1"
+  if [ -f "$_rl_lf" ]; then
+    _rl_sz=$(wc -c < "$_rl_lf" 2>/dev/null | tr -dc '0-9')
+    if [ -n "$_rl_sz" ] && [ "$_rl_sz" -gt 524288 ]; then
+      mv -f "$_rl_lf" "${_rl_lf}.old" 2>/dev/null
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] [LOG_ROTATE] Rotated $_rl_lf (>512KB)" > "$_rl_lf"
+    fi
+  fi
+}
+
+log_event() {
+  _le_lvl="${1:-INFO}"
+  _le_comp="${2:-OCORE}"
+  _le_msg="$3"
+  _le_ts="$(date '+%Y-%m-%d %H:%M:%S')"
+  rotate_log_if_needed "$OCORE_LOG"
+  echo "[$_le_ts] [$_le_lvl] [$_le_comp] $_le_msg" >> "$OCORE_LOG" 2>/dev/null
+  if [ "$_le_lvl" = "ERROR" ] || [ "$_le_lvl" = "WARN" ] || [ "$_le_lvl" = "CRIT" ]; then
+    rotate_log_if_needed "$ERROR_LOG"
+    echo "[$_le_ts] [$_le_lvl] [$_le_comp] $_le_msg" >> "$ERROR_LOG" 2>/dev/null
+  fi
+}
+
+log_tx() {
+  _tx_status="$1"
+  _tx_op="$2"
+  _tx_detail="$3"
+  _tx_ts="$(date '+%Y-%m-%d %H:%M:%S')"
+  rotate_log_if_needed "$TX_LOG"
+  echo "[$_tx_ts] [TX:$_tx_status] [$_tx_op] $_tx_detail" >> "$TX_LOG" 2>/dev/null
+  echo "$_tx_status|$_tx_op|$_tx_detail|$_tx_ts" > "$STATE_DIR/last_transaction.txt" 2>/dev/null
+  echo "TRANSACTION_STATUS=$_tx_status"
+}
+
+sanitize_token() {
+  printf "%s" "$1" | tr -dc 'a-zA-Z0-9_.:/-'
+}
+
+sanitize_int() {
+  _si_val=$(printf "%s" "$1" | tr -dc '0-9-')
+  case "$_si_val" in
+    ""|"-") echo "${2:-0}" ;;
+    *) echo "$_si_val" ;;
+  esac
+}
+
+validate_package_name() {
+  _vp_pkg="$1"
+  echo "$_vp_pkg" | grep -Eq '^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z0-9_]+)+$' || return 1
+  case "$_vp_pkg" in
+    android|system|com.android.systemui|com.android.settings|com.android.phone|com.android.nfc|me.weishu.kernelsu|com.rifsxd.ksunext|me.bmax.apatch|com.topjohnwu.magisk)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# ==============================================================================
+# TRANSACTION-AWARE KERNEL NODE I/O (Backup -> Write -> Readback -> Rollback)
+# ==============================================================================
+capture_initial_node_baseline() {
+  _cnb_node="$1"
+  [ -e "$_cnb_node" ] || return 1
+  _cnb_bfile="$BACKUP_DIR/kernel_nodes_initial.env"
+  touch "$_cnb_bfile" 2>/dev/null
+  _cnb_key=$(echo "$_cnb_node" | tr '/.-' '___')
+  if ! grep -q "^${_cnb_key}=" "$_cnb_bfile" 2>/dev/null; then
+    _cnb_cur=$(head -n 1 "$_cnb_node" 2>/dev/null | tr -d '\r\n')
+    echo "${_cnb_key}=${_cnb_node}|${_cnb_cur}" >> "$_cnb_bfile" 2>/dev/null
+  fi
+}
+
+safe_write_node() {
+  _sw_comp="$1"
+  _sw_node="$2"
+  _sw_val="$3"
+  _sw_perm="${4:-0644}"
+  _sw_verify="${5:-0}"
+  _sw_optional="${6:-0}"
+  _sw_ts="$(date '+%Y-%m-%d %H:%M:%S')"
+
+  if [ ! -e "$_sw_node" ]; then
+    [ "${DEBUG_VERBOSE:-1}" = "1" ] && echo "[$_sw_ts] [SKIP:UNSUPPORTED] [$_sw_comp] Node not present: $_sw_node" >> "$AUDIT_LOG" 2>/dev/null
+    return 2
+  fi
+
+  capture_initial_node_baseline "$_sw_node"
+  _sw_prev=$(head -n 1 "$_sw_node" 2>/dev/null | tr -d '\r\n')
+
+  # If current kernel value already equals desired target, avoid redundant write
+  if [ "$_sw_prev" = "$_sw_val" ] || \
+     { [ "$_sw_val" = "Y" ] && [ "$_sw_prev" = "1" ]; } || \
+     { [ "$_sw_val" = "1" ] && [ "$_sw_prev" = "Y" ]; } || \
+     { [ "$_sw_val" = "N" ] && [ "$_sw_prev" = "0" ]; } || \
+     { [ "$_sw_val" = "0" ] && [ "$_sw_prev" = "N" ]; }; then
+    [ "${DEBUG_VERBOSE:-1}" = "1" ] && echo "[$_sw_ts] [OK]   [$_sw_comp] Verified '$_sw_val' on $_sw_node (Readback: '$_sw_prev')" >> "$AUDIT_LOG" 2>/dev/null
+    return 0
+  fi
+
+  chmod "$_sw_perm" "$_sw_node" 2>/dev/null
+  _sw_err=$( (echo "$_sw_val" > "$_sw_node") 2>&1 )
+  _sw_rc=$?
+
+  if [ $_sw_rc -ne 0 ]; then
+    # Check if this is an optional / compile-time locked module parameter
+    case "$_sw_node" in
+      /sys/module/*/parameters/*) _sw_optional="1" ;;
+    esac
+    if [ "$_sw_optional" = "1" ]; then
+      [ "${DEBUG_VERBOSE:-1}" = "1" ] && echo "[$_sw_ts] [SKIP:KERNEL_LOCKED] [$_sw_comp] Optional param $_sw_node is read-only on this kernel (current='$_sw_prev')" >> "$AUDIT_LOG" 2>/dev/null
+      return 0
+    fi
+    log_event "ERROR" "$_sw_comp" "Write '$_sw_val' -> $_sw_node FAILED (rc=$_sw_rc, err=${_sw_err:-rejected})"
+    echo "[$_sw_ts] [FAIL] [$_sw_comp] Write '$_sw_val' -> $_sw_node FAILED (rc=$_sw_rc, err=$_sw_err)" >> "$AUDIT_LOG" 2>/dev/null
+    return 1
+  fi
+
+  _sw_rb=$(head -n 1 "$_sw_node" 2>/dev/null | tr -d '\r\n')
+  if [ "$_sw_verify" = "1" ] && [ "$_sw_rb" != "$_sw_val" ]; then
+    [ -n "$_sw_prev" ] && echo "$_sw_prev" > "$_sw_node" 2>/dev/null
+    log_event "WARN" "$_sw_comp" "Readback mismatch on $_sw_node (expected '$_sw_val', got '$_sw_rb'); rolled back to '$_sw_prev'"
+    echo "[$_sw_ts] [ROLLED_BACK] [$_sw_comp] $_sw_node expected '$_sw_val', got '$_sw_rb' -> restored '$_sw_prev'" >> "$AUDIT_LOG" 2>/dev/null
+    return 3
+  fi
+
+  [ "${DEBUG_VERBOSE:-1}" = "1" ] && echo "[$_sw_ts] [OK]   [$_sw_comp] Write '$_sw_val' -> $_sw_node (Readback: '$_sw_rb')" >> "$AUDIT_LOG" 2>/dev/null
+  return 0
+}
+
+run_tracked() {
+  _rt_comp="$1"
+  _rt_desc="$2"
+  shift 2
+  _rt_tmp="$STATE_DIR/.ocore_cmd_err_$$"
+  _rt_out=$("$@" 2>"$_rt_tmp")
+  _rt_rc=$?
+  _rt_err=$(tr '\n' ' ' < "$_rt_tmp" 2>/dev/null)
+  rm -f "$_rt_tmp" 2>/dev/null
+
+  if [ $_rt_rc -ne 0 ]; then
+    log_event "ERROR" "$_rt_comp" "$_rt_desc FAILED (exit=$_rt_rc) cmd='$*' stderr='${_rt_err:-none}' stdout='${_rt_out:-none}'"
+  else
+    [ "${DEBUG_VERBOSE:-1}" = "1" ] && log_event "DEBUG" "$_rt_comp" "$_rt_desc OK (exit=0) cmd='$*'"
+  fi
+  [ -n "$_rt_out" ] && echo "$_rt_out"
+  return $_rt_rc
+}
+
+# ==============================================================================
+# 8. CONFIGURATION TRANSACTION MANAGER (/data/adb/ocore/config.conf)
+# ==============================================================================
+write_default_config_file() {
+  _wdc_f="$1"
+  cat << 'EOC' > "$_wdc_f"
+# ==============================================================================
+# Ocore Unified Performance Engine v3.2.0-NextGen — Master Configuration
+# Path: /data/adb/ocore/config.conf
+# ==============================================================================
+CONFIG_VERSION=3200
+GLOBAL_PROFILE=balanced
+USER_MANUAL_OVERRIDE=none
+SAFE_MODE=0
+CPU_ENGINE=ocore_ai
+THERMAL_ENGINE=ocore_mtk
+THUNDER_LOCK_FREQ=0
+# 1. Multi-Domain Thermal Intelligence & Safe Trip-Point Policy
+SMART_GUARD=1
+ALLOW_TRIP_POINT_MOD=0
+CPU_WARM_C=75
+CPU_HOT_C=82
+CPU_CRIT_C=90
+GPU_WARM_C=72
+GPU_HOT_C=80
+GPU_CRIT_C=88
+SOC_WARM_C=62
+SOC_HOT_C=70
+SOC_CRIT_C=78
+BAT_WARM_C=45
+BAT_HOT_C=48
+BAT_CRIT_C=51
+THERM_HYST_C=2
+THERM_COOLDOWN_SEC=30
+FPSGO_UNLOCK=1
+GED_BOOST=1
+SYNC_MTC_PROFILES=1
+# 2. Unified Daemon Supervisor Toggles
+OCORE_BATTMON_ENABLE=1
+OCORE_BATTMON_DIV=default
+OCORE_KTUNER_ENABLE=1
+OCORE_AI_ENABLE=1
+OCORE_DYN_BAT_ENABLE=0
+OCORE_FPSMON_ENABLE=0
+DAEMON_MAX_RESTARTS=5
+DAEMON_COOLDOWN_SEC=300
+# 3. EEM Stability Framework (Default: CONSERVATIVE -3/-3/-2/-2; captures initial stock baseline)
+VOLT_PROFILE=STOCK
+VOLT_OFFSET_B=0
+VOLT_OFFSET_L=0
+VOLT_OFFSET_CCI=0
+VOLT_OFFSET_GPU=0
+SCHEDUTIL_TUNE_ENABLE=1
+EEM_PERSIST_GUARD=1
+# 4. Core, Scheduler, I/O & Memory Subsystems
+CPUSET_EAS_OPT=1
+IO_QUEUE_OPT=1
+IO_SCHEDULER=default
+ZRAM_SWAPPINESS=100
+TCP_LOW_LATENCY=1
+PRIVATE_DNS_MODE=off
+DEEP_DOZE_ENABLE=0
+MTK_APU_DRAM_BOOST=0
+FREEFORM_ENABLE=1
+# 5. Advanced Gaming & Frame Stability Subsystems
+GAME_DETECT_MODE=auto
+GAME_DND_ENABLE=0
+GAME_PRELOAD_ENABLE=0
+TOUCH_LEVEL=2
+REFRESH_IDX=-1
+RENDER_MODE=default
+# 6. Smart Charging & Bypass Charging
+BYPASS_CHG_ENABLE=0
+BYPASS_CHG_THRESHOLD=20
+SMART_CHARGE_LIMIT=0
+SMART_CHARGE_STOP=85
+SMART_CHARGE_RESUME=75
+# 7. Performance Intelligence (Advisory by default)
+AUTO_APPLY_RECOMMENDATION=0
+DEBUG_VERBOSE=1
+# 8. Custom Profile & Critical Battery Thresholds (v3.2.0-NextGen)
+CRIT_BATT_PCT=10
+GPU_MODE=balance
+CUSTOM_CPU_MIN_PCT=20
+CUSTOM_CPU_MAX_PCT=90
+CUSTOM_CPU_GOV=schedutil
+CUSTOM_GPU_MODE=balance
+CUSTOM_SWAPPINESS=100
+CUSTOM_TOUCH_LEVEL=3
+# 9. Floating FPS HUD & Adaptive Gaming Subsystems (v3.2.0-NextGen)
+AUTO_FLOATING_HUD=1
+HUD_POLL_INTERVAL_MS=2000
+FPS_GREEN_PCT=85
+FPS_YELLOW_PCT=60
+SMART_RESOURCE_MGR=1
+ADAPTIVE_GAMING_ENGINE=1
+EOC
+}
+
+init_default_config() {
+  if [ ! -f "$OCORE_CONF" ] || [ ! -s "$OCORE_CONF" ]; then
+    _idc_tmp="${OCORE_CONF}.init.$$"
+    write_default_config_file "$_idc_tmp"
+    mv -f "$_idc_tmp" "$OCORE_CONF" 2>/dev/null
+    cp -f "$OCORE_CONF" "$BACKUP_DIR/config.default.bak" 2>/dev/null
+    log_event "INFO" "CONFIG" "Initialized default /data/adb/ocore/config.conf (v3.2.0-NextGen)"
+  fi
+}
+
+validate_and_load_config() {
+  init_default_config
+  if ! sh -n "$OCORE_CONF" 2>/dev/null; then
+    log_event "ERROR" "CONFIG" "Corrupted config.conf detected! Rolling back to last known good backup."
+    cp -f "$OCORE_CONF" "$BACKUP_DIR/config.corrupt.$(date '+%s').bak" 2>/dev/null
+    if [ -f "$BACKUP_DIR/config.last_good.bak" ] && sh -n "$BACKUP_DIR/config.last_good.bak" 2>/dev/null; then
+      cp -f "$BACKUP_DIR/config.last_good.bak" "$OCORE_CONF" 2>/dev/null
+    else
+      write_default_config_file "$OCORE_CONF"
+    fi
+  fi
+
+  . "$OCORE_CONF"
+
+  : "${CONFIG_VERSION:=2100}"
+  : "${GLOBAL_PROFILE:=balanced}"
+  : "${USER_MANUAL_OVERRIDE:=none}"
+  : "${SAFE_MODE:=0}"
+  : "${CPU_ENGINE:=ocore_ai}"
+  : "${THERMAL_ENGINE:=ocore_mtk}"
+  : "${THUNDER_LOCK_FREQ:=0}"
+  : "${SMART_GUARD:=1}"
+  : "${ALLOW_TRIP_POINT_MOD:=0}"
+  : "${CPU_WARM_C:=75}"; : "${CPU_HOT_C:=82}"; : "${CPU_CRIT_C:=90}"
+  : "${GPU_WARM_C:=72}"; : "${GPU_HOT_C:=80}"; : "${GPU_CRIT_C:=88}"
+  : "${SOC_WARM_C:=62}"; : "${SOC_HOT_C:=70}"; : "${SOC_CRIT_C:=78}"
+  : "${BAT_WARM_C:=45}"; : "${BAT_HOT_C:=48}"; : "${BAT_CRIT_C:=51}"
+  : "${THERM_HYST_C:=2}"
+  : "${THERM_COOLDOWN_SEC:=30}"
+  : "${FPSGO_UNLOCK:=1}"
+  : "${GED_BOOST:=1}"
+  : "${SYNC_MTC_PROFILES:=1}"
+  : "${OCORE_BATTMON_ENABLE:=1}"
+  : "${OCORE_BATTMON_DIV:=default}"
+  : "${OCORE_KTUNER_ENABLE:=1}"
+  : "${OCORE_AI_ENABLE:=1}"
+  : "${OCORE_DYN_BAT_ENABLE:=0}"
+  : "${OCORE_FPSMON_ENABLE:=0}"
+  : "${DAEMON_MAX_RESTARTS:=5}"
+  : "${DAEMON_COOLDOWN_SEC:=300}"
+  : "${VOLT_PROFILE:=STOCK}"
+  : "${VOLT_OFFSET_B:=-3}"
+  : "${VOLT_OFFSET_L:=-3}"
+  : "${VOLT_OFFSET_CCI:=-2}"
+  : "${VOLT_OFFSET_GPU:=-2}"
+  : "${SCHEDUTIL_TUNE_ENABLE:=1}"
+  : "${EEM_PERSIST_GUARD:=1}"
+  : "${CPUSET_EAS_OPT:=1}"
+  : "${IO_QUEUE_OPT:=1}"
+  : "${IO_SCHEDULER:=default}"
+  : "${ZRAM_SWAPPINESS:=100}"
+  : "${TCP_LOW_LATENCY:=1}"
+  : "${PRIVATE_DNS_MODE:=off}"
+  : "${DEEP_DOZE_ENABLE:=0}"
+  : "${MTK_APU_DRAM_BOOST:=0}"
+  : "${GAME_DETECT_MODE:=auto}"
+  : "${GAME_DND_ENABLE:=0}"
+  : "${GAME_PRELOAD_ENABLE:=0}"
+  : "${TOUCH_LEVEL:=2}"
+  : "${REFRESH_IDX:=-1}"
+  : "${RENDER_MODE:=default}"
+  : "${BYPASS_CHG_ENABLE:=0}"
+  : "${BYPASS_CHG_THRESHOLD:=20}"
+  : "${SMART_CHARGE_LIMIT:=0}"
+  : "${SMART_CHARGE_STOP:=85}"
+  : "${SMART_CHARGE_RESUME:=75}"
+  : "${AUTO_APPLY_RECOMMENDATION:=0}"
+  : "${DEBUG_VERBOSE:=1}"
+  : "${CRIT_BATT_PCT:=10}"
+  : "${GPU_MODE:=balance}"
+  : "${CUSTOM_CPU_MIN_PCT:=20}"
+  : "${CUSTOM_CPU_MAX_PCT:=90}"
+  : "${CUSTOM_CPU_GOV:=schedutil}"
+  : "${CUSTOM_GPU_MODE:=balance}"
+  : "${CUSTOM_SWAPPINESS:=100}"
+  : "${CUSTOM_TOUCH_LEVEL:=3}"
+  : "${AUTO_FLOATING_HUD:=1}"
+  : "${HUD_POLL_INTERVAL_MS:=2000}"
+  : "${FPS_GREEN_PCT:=85}"
+  : "${FPS_YELLOW_PCT:=60}"
+  : "${SMART_RESOURCE_MGR:=1}"
+  : "${ADAPTIVE_GAMING_ENGINE:=1}"
+  [ "$THERMAL_ENGINE" = "ocore_mtk" ] && THERMAL_ENGINE="ocore_intel"
+}
+
+save_ocore_key() {
+  _sok_key=$(sanitize_token "$1")
+  _sok_val=$(sanitize_token "$2")
+  [ -z "$_sok_key" ] && return 1
+  init_default_config
+  acquire_core_lock "config"
+
+  _sok_bak="$BACKUP_DIR/config.tx_pre.bak"
+  cp -f "$OCORE_CONF" "$_sok_bak" 2>/dev/null
+
+  _sok_tmp="${OCORE_CONF}.tmp.$$"
+  if grep -q "^${_sok_key}=" "$OCORE_CONF" 2>/dev/null; then
+    sed "s|^${_sok_key}=.*|${_sok_key}=${_sok_val}|" "$OCORE_CONF" > "$_sok_tmp" 2>/dev/null
+  else
+    cat "$OCORE_CONF" > "$_sok_tmp" 2>/dev/null
+    echo "${_sok_key}=${_sok_val}" >> "$_sok_tmp"
+  fi
+
+  if [ -s "$_sok_tmp" ] && sh -n "$_sok_tmp" 2>/dev/null; then
+    mv -f "$_sok_tmp" "$OCORE_CONF" 2>/dev/null
+    _sok_rb=$(grep "^${_sok_key}=" "$OCORE_CONF" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    if [ "$_sok_rb" = "$_sok_val" ]; then
+      cp -f "$OCORE_CONF" "$BACKUP_DIR/config.last_good.bak" 2>/dev/null
+      cp -f "$OCORE_CONF" "$OCORE_DIR/config/config.conf" 2>/dev/null
+      release_core_lock "config"
+      return 0
+    else
+      cp -f "$_sok_bak" "$OCORE_CONF" 2>/dev/null
+      release_core_lock "config"
+      log_event "ERROR" "TX_CONFIG" "Readback verification failed for ${_sok_key}=${_sok_val}; rolled back config.conf"
+      return 1
+    fi
+  else
+    rm -f "$_sok_tmp" 2>/dev/null
+    cp -f "$_sok_bak" "$OCORE_CONF" 2>/dev/null
+    release_core_lock "config"
+    log_event "ERROR" "TX_CONFIG" "Syntax validation failed for ${_sok_key}=${_sok_val}; rolled back config.conf"
+    return 1
+  fi
+}
+
+migrate_config() {
+  validate_and_load_config
+  [ "$VOLT_PROFILE" = "BALANCED" ] && VOLT_PROFILE="CONSERVATIVE"
+  # Auto-heal legacy overly aggressive 41/44/47 battery thresholds that caused false HOT overrides at 44C
+  if [ "$BAT_WARM_C" = "41" ] && [ "$BAT_HOT_C" = "44" ]; then
+    BAT_WARM_C="45"; BAT_HOT_C="48"; BAT_CRIT_C="51"
+    save_ocore_key "BAT_WARM_C" "45"
+    save_ocore_key "BAT_HOT_C" "48"
+    save_ocore_key "BAT_CRIT_C" "51"
+  fi
+  for _mc_kv in \
+    "CONFIG_VERSION=3200" \
+    "USER_MANUAL_OVERRIDE=$USER_MANUAL_OVERRIDE" \
+    "SAFE_MODE=$SAFE_MODE" \
+    "ALLOW_TRIP_POINT_MOD=$ALLOW_TRIP_POINT_MOD" \
+    "CPU_WARM_C=$CPU_WARM_C" "CPU_HOT_C=$CPU_HOT_C" "CPU_CRIT_C=$CPU_CRIT_C" \
+    "GPU_WARM_C=$GPU_WARM_C" "GPU_HOT_C=$GPU_HOT_C" "GPU_CRIT_C=$GPU_CRIT_C" \
+    "SOC_WARM_C=$SOC_WARM_C" "SOC_HOT_C=$SOC_HOT_C" "SOC_CRIT_C=$SOC_CRIT_C" \
+    "BAT_WARM_C=$BAT_WARM_C" "BAT_HOT_C=$BAT_HOT_C" "BAT_CRIT_C=$BAT_CRIT_C" \
+    "THERM_HYST_C=$THERM_HYST_C" \
+    "THERM_COOLDOWN_SEC=$THERM_COOLDOWN_SEC" \
+    "OCORE_FPSMON_ENABLE=$OCORE_FPSMON_ENABLE" \
+    "DAEMON_MAX_RESTARTS=$DAEMON_MAX_RESTARTS" \
+    "DAEMON_COOLDOWN_SEC=$DAEMON_COOLDOWN_SEC" \
+    "IO_SCHEDULER=$IO_SCHEDULER" \
+    "GAME_DETECT_MODE=$GAME_DETECT_MODE" \
+    "GAME_DND_ENABLE=$GAME_DND_ENABLE" \
+    "GAME_PRELOAD_ENABLE=$GAME_PRELOAD_ENABLE" \
+    "AUTO_APPLY_RECOMMENDATION=$AUTO_APPLY_RECOMMENDATION"; do
+    _mc_k="${_mc_kv%%=*}"
+    _mc_v="${_mc_kv#*=}"
+    if ! grep -q "^${_mc_k}=" "$OCORE_CONF" 2>/dev/null; then
+      save_ocore_key "$_mc_k" "$_mc_v"
+    fi
+  done
+  save_ocore_key "CONFIG_VERSION" "3200"
+  log_tx "APPLIED" "config_migrate" "Migrated and verified /data/adb/ocore/config.conf to v3.2.0-NextGen (3200)"
+  echo "[OK] Configuration migrated and validated (v3.2.0-NextGen)"
+}
+
+# ==============================================================================
+# HARDWARE COMPATIBILITY & CAPABILITY SCANNER
+# ==============================================================================
+detect_charging_node() {
+  for _dcn_node in \
+    "/proc/mtk_battery_cmd/current_cmd" \
+    "/sys/class/power_supply/battery/charging_enabled" \
+    "/sys/class/power_supply/battery/BatteryChargingEnabled" \
+    "/sys/class/power_supply/battery/input_suspend" \
+    "/sys/class/power_supply/battery/battery_input_suspend" \
+    "/proc/driver/charger_limit_enable" \
+    "/sys/devices/platform/mt-battery/disable_charger"; do
+    if [ -e "$_dcn_node" ]; then
+      echo "$_dcn_node"
+      return 0
+    fi
+  done
+  echo "UNSUPPORTED"
+  return 1
+}
+
+scan_hardware_capabilities() {
+  PLATFORM="$(getprop ro.board.platform 2>/dev/null)"
+  HARDWARE="$(getprop ro.hardware 2>/dev/null)"
+  SOC_MODEL="$(getprop ro.soc.model 2>/dev/null)"
+  DEVICE="$(getprop ro.product.device 2>/dev/null)"
+  MODEL="$(getprop ro.product.model 2>/dev/null)"
+  ANDROID_VER="$(getprop ro.build.version.release 2>/dev/null)"
+  API_LVL="$(getprop ro.build.version.sdk 2>/dev/null)"
+  KVER="$(uname -r 2>/dev/null)"
+
+  ROOT_MGR="Magisk / Generic SU"
+  if [ -d "/data/adb/ksu" ]; then
+    if [ -n "$KSU_NEXT" ] || grep -qi "next" /data/adb/ksu/bin/ksud 2>/dev/null; then
+      ROOT_MGR="KernelSU Next"
+    else
+      ROOT_MGR="KernelSU"
+    fi
+  elif [ -d "/data/adb/ap" ]; then
+    ROOT_MGR="APatch"
+  elif [ -d "/data/adb/magisk" ]; then
+    ROOT_MGR="Magisk"
+  fi
+
+  SOC_LOWER=$(echo "$PLATFORM $HARDWARE $SOC_MODEL" | tr '[:upper:]' '[:lower:]')
+  case "$SOC_LOWER" in
+    *mt6877*|*dimensity*900*|*dimensity*1080*) SOC_FAM="MediaTek Dimensity (MT6877)"; SOC_ID=1 ;;
+    *mt*|*dimensity*|*helio*|*mediatek*)       SOC_FAM="MediaTek ($PLATFORM)"; SOC_ID=1 ;;
+    *sm*|*qcom*|*snapdragon*|*sdm*)            SOC_FAM="Qualcomm Snapdragon ($PLATFORM)"; SOC_ID=2 ;;
+    *exynos*|*s5e*|*universal*)                SOC_FAM="Samsung Exynos ($PLATFORM)"; SOC_ID=3 ;;
+    *unisoc*|*ums*)                            SOC_FAM="Unisoc ($PLATFORM)"; SOC_ID=4 ;;
+    *gs*|*tensor*)                             SOC_FAM="Google Tensor ($PLATFORM)"; SOC_ID=5 ;;
+    *)                                         SOC_FAM="Generic ARM ($PLATFORM)"; SOC_ID=0 ;;
+  esac
+
+  CPU_CLUSTERS=""
+  TOTAL_CORES=0
+  for c in /sys/devices/system/cpu/cpu[0-9]*; do
+    [ -d "$c" ] && TOTAL_CORES=$((TOTAL_CORES + 1))
+  done
+  for pol in /sys/devices/system/cpu/cpufreq/policy*; do
+    [ -d "$pol" ] || continue
+    pid="${pol##*policy}"
+    rel=$(cat "$pol/related_cpus" 2>/dev/null | tr ' ' ',')
+    maxf=$(cat "$pol/cpuinfo_max_freq" 2>/dev/null)
+    max_mhz=$(( ${maxf:-0} / 1000 ))
+    CPU_CLUSTERS="${CPU_CLUSTERS}policy${pid}(cpus:${rel:-$pid}@${max_mhz}MHz) "
+  done
+
+  EEM_SUP=0
+  EEM_RAILS=""
+  for base_dir in /proc/eem /proc/eemg; do
+    if [ -d "$base_dir" ]; then
+      for det in EEM_DET_B EEM_DET_BL EEM_DET_L EEM_DET_2L EEM_DET_CCI EEM_DET_GPU; do
+        if [ -f "$base_dir/$det/eem_offset" ]; then
+          EEM_SUP=1
+          EEM_RAILS="${EEM_RAILS}${det} "
+        fi
+      done
+    fi
+  done
+
+  GPU_ARCH="Generic"
+  GPU_DVFS_NODE="UNSUPPORTED"
+  if [ -d "/proc/gpufreqv2" ]; then
+    GPU_ARCH="MediaTek GPUFreq v2"
+    GPU_DVFS_NODE="/proc/gpufreqv2"
+  elif [ -d "/proc/gpufreq" ]; then
+    GPU_ARCH="MediaTek GPUFreq v1"
+    GPU_DVFS_NODE="/proc/gpufreq"
+  elif [ -d "/sys/class/kgsl/kgsl-3d0/devfreq" ]; then
+    GPU_ARCH="Qualcomm Adreno KGSL"
+    GPU_DVFS_NODE="/sys/class/kgsl/kgsl-3d0/devfreq"
+  else
+    for d in /sys/class/devfreq/*mali* /sys/class/devfreq/*gpu* /sys/devices/platform/*.mali; do
+      if [ -d "$d" ]; then
+        GPU_ARCH="ARM Mali Devfreq"
+        GPU_DVFS_NODE="$d"
+        break
+      fi
+    done
+  fi
+
+  GED_SUP=0; [ -d "/sys/module/ged/parameters" ] && GED_SUP=1
+  FPSGO_SUP=0; [ -d "/sys/kernel/fpsgo" ] && FPSGO_SUP=1
+  PPM_SUP=0; [ -f "/proc/ppm/enabled" ] && PPM_SUP=1
+  MTK_THERM_SUP=0; [ -d "/proc/driver/thermal" ] && MTK_THERM_SUP=1
+  CPUSET_SUP=0; [ -d "/dev/cpuset" ] && CPUSET_SUP=1
+  CHG_NODE="$(detect_charging_node)"
+  CHG_SUP=1; [ "$CHG_NODE" = "UNSUPPORTED" ] && CHG_SUP=0
+
+  BATT_HEALTH_SUP=0
+  if [ -f "/sys/class/power_supply/battery/charge_full" ] && [ -f "/sys/class/power_supply/battery/charge_full_design" ]; then
+    BATT_HEALTH_SUP=1
+  elif [ -f "/sys/class/power_supply/battery/health" ]; then
+    BATT_HEALTH_SUP=1
+  fi
+
+  MFG="$(getprop ro.product.manufacturer 2>/dev/null)"
+  BRAND="$(getprop ro.product.brand 2>/dev/null)"
+  PRODUCT="$(getprop ro.product.name 2>/dev/null)"
+  SOC_MFG="$(getprop ro.soc.manufacturer 2>/dev/null)"
+  ARCH_ABI="$(getprop ro.product.cpu.abi 2>/dev/null)"
+  [ -z "$ARCH_ABI" ] && ARCH_ABI="$(uname -m 2>/dev/null)"
+  STORAGE_TYPE="$(detect_storage_type)"
+  DISPLAY_HZ="$(detect_display_refresh_rates)"
+  VK_CAP="$(check_vulkan_driver_support)"
+
+  # Tri-State Capability Evaluation (SUPPORTED | UNSUPPORTED | UNKNOWN)
+  CAP_CPU_DVFS="UNSUPPORTED"
+  if [ -d "/sys/devices/system/cpu/cpufreq/policy0" ]; then
+    [ -w "/sys/devices/system/cpu/cpufreq/policy0/scaling_max_freq" ] && CAP_CPU_DVFS="SUPPORTED" || CAP_CPU_DVFS="UNKNOWN"
+  fi
+  CAP_GPU_DVFS="UNSUPPORTED"
+  [ "$GPU_DVFS_NODE" != "UNSUPPORTED" ] && CAP_GPU_DVFS="SUPPORTED"
+  CAP_EEM_VOLT="UNSUPPORTED"
+  [ "$EEM_SUP" = "1" ] && CAP_EEM_VOLT="SUPPORTED"
+  CAP_THERMAL_PROC="UNSUPPORTED"
+  [ "$MTK_THERM_SUP" = "1" ] && CAP_THERMAL_PROC="SUPPORTED"
+  CAP_GED_BOOST="UNSUPPORTED"
+  [ "$GED_SUP" = "1" ] && CAP_GED_BOOST="SUPPORTED"
+  CAP_FPSGO="UNSUPPORTED"
+  [ "$FPSGO_SUP" = "1" ] && CAP_FPSGO="SUPPORTED"
+  CAP_CPUSET_EAS="UNSUPPORTED"
+  [ "$CPUSET_SUP" = "1" ] && CAP_CPUSET_EAS="SUPPORTED"
+  CAP_CHARGER_BYPASS="UNSUPPORTED"
+  [ "$CHG_SUP" = "1" ] && CAP_CHARGER_BYPASS="SUPPORTED"
+  CAP_ZRAM_TUNE="UNSUPPORTED"
+  [ -f "/proc/sys/vm/swappiness" ] && CAP_ZRAM_TUNE="SUPPORTED"
+  CAP_ZYGISK_SPOOF="UNSUPPORTED"
+  [ -f "$MODDIR/zygisk/arm64-v8a.so" ] && [ -f "$MODDIR/cortex/OCORE.json" ] && CAP_ZYGISK_SPOOF="SUPPORTED"
+  RUNTIME_VERIFIED="RUNTIME_VERIFIED"
+  if [ ! -d "/sys/devices/system/cpu/cpufreq/policy0" ] && [ ! -d "/sys/class/power_supply/battery" ]; then
+    RUNTIME_VERIFIED="NOT_RUNTIME_VERIFIED"
+  fi
+
+  cat << EOF > "$STATE_DIR/hw_capabilities.env"
+HW_MANUFACTURER="${MFG:-Unknown}"
+HW_BRAND="${BRAND:-Unknown}"
+HW_PRODUCT="${PRODUCT:-Unknown}"
+HW_SOC_MFG="${SOC_MFG:-Unknown}"
+HW_ARCH="${ARCH_ABI:-arm64-v8a}"
+HW_STORAGE_TYPE="$STORAGE_TYPE"
+HW_DISPLAY_HZ="$DISPLAY_HZ"
+HW_VULKAN_CAP="$VK_CAP"
+CAP_CPU_DVFS="$CAP_CPU_DVFS"
+CAP_GPU_DVFS="$CAP_GPU_DVFS"
+CAP_EEM_VOLT="$CAP_EEM_VOLT"
+CAP_THERMAL_PROC="$CAP_THERMAL_PROC"
+CAP_GED_BOOST="$CAP_GED_BOOST"
+CAP_FPSGO="$CAP_FPSGO"
+CAP_CPUSET_EAS="$CAP_CPUSET_EAS"
+CAP_CHARGER_BYPASS="$CAP_CHARGER_BYPASS"
+CAP_ZRAM_TUNE="$CAP_ZRAM_TUNE"
+CAP_ZYGISK_SPOOF="$CAP_ZYGISK_SPOOF"
+RUNTIME_VERIFIED_STATE="$RUNTIME_VERIFIED"
+HW_MODEL="$MODEL"
+HW_DEVICE="$DEVICE"
+HW_PLATFORM="$PLATFORM"
+HW_SOC_MODEL="$SOC_MODEL"
+HW_SOC_FAM="$SOC_FAM"
+HW_SOC_ID="$SOC_ID"
+HW_ANDROID="$ANDROID_VER"
+HW_API="$API_LVL"
+HW_KERNEL="$KVER"
+HW_ROOT_MGR="$ROOT_MGR"
+HW_TOTAL_CORES="$TOTAL_CORES"
+HW_CPU_CLUSTERS="${CPU_CLUSTERS% }"
+HW_EEM_SUPPORTED="$EEM_SUP"
+HW_EEM_RAILS="${EEM_RAILS% }"
+HW_GPU_ARCH="$GPU_ARCH"
+HW_GPU_NODE="$GPU_DVFS_NODE"
+HW_GED_SUPPORTED="$GED_SUP"
+HW_FPSGO_SUPPORTED="$FPSGO_SUP"
+HW_PPM_SUPPORTED="$PPM_SUP"
+HW_MTK_THERM_SUPPORTED="$MTK_THERM_SUP"
+HW_CPUSET_SUPPORTED="$CPUSET_SUP"
+HW_CHG_SUPPORTED="$CHG_SUP"
+HW_CHG_NODE="$CHG_NODE"
+HW_BATT_HEALTH_SUPPORTED="$BATT_HEALTH_SUP"
+EOF
+}
+
+# ==============================================================================
+# 2. EEM STABILITY FRAMEWORK
+# ==============================================================================
+EEM_BASELINE_FILE="$BACKUP_DIR/eem_initial_stock.env"
+
+capture_eem_initial_baseline() {
+  [ -f "$EEM_BASELINE_FILE" ] && return 0
+  found_any=0
+  tmp_b="${EEM_BASELINE_FILE}.tmp.$$"
+  echo "# Ocore Pre-Modification EEM Hardware Baseline (Captured $(date '+%Y-%m-%d %H:%M:%S'))" > "$tmp_b"
+  for base_dir in /proc/eem /proc/eemg; do
+    [ -d "$base_dir" ] || continue
+    for det in EEM_DET_B EEM_DET_BL EEM_DET_L EEM_DET_2L EEM_DET_CCI EEM_DET_GPU; do
+      node="$base_dir/$det/eem_offset"
+      if [ -f "$node" ]; then
+        found_any=1
+        raw_v=$(cat "$node" 2>/dev/null | tr -dc '0-9-')
+        [ -z "$raw_v" ] && raw_v=0
+        key="STOCK_$(echo "${base_dir}_${det}" | tr '/-' '__')"
+        echo "${key}=${raw_v}" >> "$tmp_b"
+      fi
+    done
+  done
+  if [ "$found_any" -eq 1 ]; then
+    mv -f "$tmp_b" "$EEM_BASELINE_FILE" 2>/dev/null
+    log_event "INFO" "EEM_GUARD" "Captured pre-modification EEM hardware stock baseline to $EEM_BASELINE_FILE"
+  else
+    rm -f "$tmp_b" 2>/dev/null
+  fi
+}
+
+get_eem_stock_rail_value() {
+  _ges_b="$1"
+  _ges_d="$2"
+  if [ -f "$EEM_BASELINE_FILE" ]; then
+    _ges_k="STOCK_$(echo "${_ges_b}_${_ges_d}" | tr '/-' '__')"
+    _ges_v=$(grep "^${_ges_k}=" "$EEM_BASELINE_FILE" 2>/dev/null | head -n 1 | cut -d= -f2)
+    if [ -n "$_ges_v" ]; then
+      echo "$_ges_v"
+      return 0
+    fi
+  fi
+  echo "0"
+}
+
+clamp_eem_offset() {
+  _ceo_v=$(sanitize_int "$1" "0")
+  if [ "$_ceo_v" -lt -12 ] 2>/dev/null; then
+    echo "-12"
+  elif [ "$_ceo_v" -gt 4 ] 2>/dev/null; then
+    echo "4"
+  else
+    echo "$_ceo_v"
+  fi
+}
+
+apply_eem_rail_independent() {
+  rail_names="$1"
+  target_mode="$2"
+  rail_offset=$(clamp_eem_offset "$3")
+  rail_label="$4"
+  force_write="${5:-0}"
+  applied_cnt=0
+  rollback_cnt=0
+
+  for base_dir in /proc/eem /proc/eemg; do
+    [ -d "$base_dir" ] || continue
+    for det_name in $rail_names; do
+      node="$base_dir/$det_name/eem_offset"
+      if [ -f "$node" ]; then
+        stock_v=$(get_eem_stock_rail_value "$base_dir" "$det_name")
+        if [ "$target_mode" = "STOCK" ]; then
+          desired="$stock_v"
+        else
+          desired=$((stock_v + rail_offset))
+          desired=$(clamp_eem_offset "$desired")
+        fi
+
+        cur_val=$(cat "$node" 2>/dev/null | tr -dc '0-9-')
+        if [ "$force_write" = "0" ] && [ "$cur_val" = "$desired" ]; then
+          applied_cnt=$((applied_cnt + 1))
+          continue
+        fi
+
+        chmod 0644 "$node" 2>/dev/null
+        if (echo "$desired" > "$node") 2>/dev/null; then
+          rb=$(cat "$node" 2>/dev/null | tr -dc '0-9-')
+          if [ "$rb" = "$desired" ]; then
+            mv_delta=$((desired * 625 / 100))
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [APPLIED] $rail_label ($node): baseline=$stock_v, target=$desired (~${mv_delta}mV), readback=$rb" >> "$VOLT_LOG"
+            applied_cnt=$((applied_cnt + 1))
+          else
+            echo "$stock_v" > "$node" 2>/dev/null
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ROLLED_BACK] $rail_label ($node): readback mismatch (wrote $desired, got ${rb:-empty}) -> restored stock baseline ($stock_v)" >> "$VOLT_LOG"
+            rollback_cnt=$((rollback_cnt + 1))
+          fi
+        else
+          echo "$stock_v" > "$node" 2>/dev/null
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ROLLED_BACK] $rail_label ($node): write rejected -> restored stock baseline ($stock_v)" >> "$VOLT_LOG"
+          rollback_cnt=$((rollback_cnt + 1))
+        fi
+      fi
+    done
+  done
+
+  [ "$rollback_cnt" -gt 0 ] && return 3
+  return 0
+}
+
+apply_eem_voltage() {
+  validate_and_load_config
+  rotate_log_if_needed "$VOLT_LOG"
+  capture_eem_initial_baseline
+
+  preset=$(sanitize_token "${1:-$VOLT_PROFILE}")
+  case "$preset" in
+    DISABLED|disabled|off)
+      VOLT_PROFILE="DISABLED"
+      save_ocore_key "VOLT_PROFILE" "DISABLED"
+      log_tx "APPLIED" "volt_profile" "EEM Voltage controller set to DISABLED (no kernel writes)"
+      echo "[OK] EEM Voltage Controller DISABLED (Kernel rails untouched)"
+      return 0
+      ;;
+    STOCK|stock|0)
+      VOLT_PROFILE="STOCK"
+      VOLT_OFFSET_B="0"; VOLT_OFFSET_L="0"; VOLT_OFFSET_CCI="0"; VOLT_OFFSET_GPU="0"
+      ;;
+    CONSERVATIVE|conservative|BALANCED|balanced|SAFE|safe)
+      VOLT_PROFILE="CONSERVATIVE"
+      VOLT_OFFSET_B="-3"; VOLT_OFFSET_L="-3"; VOLT_OFFSET_CCI="-2"; VOLT_OFFSET_GPU="-2"
+      ;;
+    OPTIMAL|optimal)
+      VOLT_PROFILE="OPTIMAL"
+      VOLT_OFFSET_B="-5"; VOLT_OFFSET_L="-5"; VOLT_OFFSET_CCI="-4"; VOLT_OFFSET_GPU="-3"
+      ;;
+    CUSTOM|custom)
+      VOLT_PROFILE="CUSTOM"
+      [ -n "$2" ] && VOLT_OFFSET_B=$(clamp_eem_offset "$2")
+      [ -n "$3" ] && VOLT_OFFSET_L=$(clamp_eem_offset "$3")
+      [ -n "$4" ] && VOLT_OFFSET_CCI=$(clamp_eem_offset "$4")
+      [ -n "$5" ] && VOLT_OFFSET_GPU=$(clamp_eem_offset "$5")
+      ;;
+    *)
+      log_tx "FAILED" "volt_profile" "Invalid EEM profile '$preset'"
+      echo "[ERROR] Invalid EEM profile: $preset (Valid: STOCK, CONSERVATIVE, OPTIMAL, CUSTOM, DISABLED)"
+      return 1
+      ;;
+  esac
+
+  if [ "${SAFE_MODE:-0}" = "1" ]; then
+    VOLT_PROFILE="STOCK"
+    VOLT_OFFSET_B="0"; VOLT_OFFSET_L="0"; VOLT_OFFSET_CCI="0"; VOLT_OFFSET_GPU="0"
+  fi
+
+  save_ocore_key "VOLT_PROFILE" "$VOLT_PROFILE"
+  save_ocore_key "VOLT_OFFSET_B" "$VOLT_OFFSET_B"
+  save_ocore_key "VOLT_OFFSET_L" "$VOLT_OFFSET_L"
+  save_ocore_key "VOLT_OFFSET_CCI" "$VOLT_OFFSET_CCI"
+  save_ocore_key "VOLT_OFFSET_GPU" "$VOLT_OFFSET_GPU"
+
+  found_eem=0
+  for base_dir in /proc/eem /proc/eemg; do
+    if [ -d "$base_dir" ]; then
+      found_eem=1
+      break
+    fi
+  done
+
+  if [ "$found_eem" -eq 0 ]; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [UNSUPPORTED] /proc/eem or /proc/eemg not exposed on this kernel." >> "$VOLT_LOG"
+    log_tx "UNSUPPORTED" "volt_profile" "Kernel does not expose /proc/eem*; saved config=$VOLT_PROFILE"
+    echo "[UNSUPPORTED] Kernel does not expose /proc/eem interface on this device"
+    return 2
+  fi
+
+  rb_err=0
+  apply_eem_rail_independent "EEM_DET_B EEM_DET_BL" "$VOLT_PROFILE" "$VOLT_OFFSET_B" "CPU_Big" "1" || rb_err=1
+  apply_eem_rail_independent "EEM_DET_L EEM_DET_2L" "$VOLT_PROFILE" "$VOLT_OFFSET_L" "CPU_Little" "1" || rb_err=1
+  apply_eem_rail_independent "EEM_DET_CCI" "$VOLT_PROFILE" "$VOLT_OFFSET_CCI" "CCI" "1" || rb_err=1
+  apply_eem_rail_independent "EEM_DET_GPU" "$VOLT_PROFILE" "$VOLT_OFFSET_GPU" "GPU" "1" || rb_err=1
+
+  if [ "$rb_err" -eq 1 ]; then
+    log_tx "ROLLED_BACK" "volt_profile" "One or more EEM rails failed readback and were rolled back to stock baseline"
+    echo "[ROLLED_BACK] Readback mismatch on EEM rail; restored initial stock baseline"
+    return 3
+  fi
+
+  log_tx "APPLIED" "volt_profile" "Applied EEM Profile=$VOLT_PROFILE (B:$VOLT_OFFSET_B L:$VOLT_OFFSET_L CCI:$VOLT_OFFSET_CCI GPU:$VOLT_OFFSET_GPU)"
+  echo "[OK] EEM Profile applied: $VOLT_PROFILE (B:${VOLT_OFFSET_B} L:${VOLT_OFFSET_L} CCI:${VOLT_OFFSET_CCI} GPU:${VOLT_OFFSET_GPU})"
+  return 0
+}
+
+verify_eem_persistence_if_needed() {
+  validate_and_load_config
+  [ "${EEM_PERSIST_GUARD:-1}" != "1" ] && return 0
+  [ "${VOLT_PROFILE:-CONSERVATIVE}" = "DISABLED" ] && return 0
+  [ "${SAFE_MODE:-0}" = "1" ] && return 0
+  t_state=$(cat "$STATE_DIR/thermal_state" 2>/dev/null)
+  [ "$t_state" = "CRITICAL" ] || [ "$t_state" = "EMERGENCY" ] && return 0
+
+  apply_eem_rail_independent "EEM_DET_B EEM_DET_BL" "$VOLT_PROFILE" "$VOLT_OFFSET_B" "CPU_Big" "0"
+  apply_eem_rail_independent "EEM_DET_L EEM_DET_2L" "$VOLT_PROFILE" "$VOLT_OFFSET_L" "CPU_Little" "0"
+  apply_eem_rail_independent "EEM_DET_CCI" "$VOLT_PROFILE" "$VOLT_OFFSET_CCI" "CCI" "0"
+  apply_eem_rail_independent "EEM_DET_GPU" "$VOLT_PROFILE" "$VOLT_OFFSET_GPU" "GPU" "0"
+}
+
+# ==============================================================================
+# 3. 6-TIER PERFORMANCE ARBITER
+# ==============================================================================
+unlock_cpu_nodes() {
+  [ -f "/proc/cpudvfs/cpufreq_debug" ] && chmod 0644 /proc/cpudvfs/cpufreq_debug 2>/dev/null
+  for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+    [ -d "$policy" ] || continue
+    chmod 0644 "$policy/scaling_max_freq" "$policy/scaling_min_freq" "$policy/scaling_governor" \
+      "$policy/scaling_boost_freq" "$policy/scaling_boost_frequencies" 2>/dev/null
+  done
+  [ -f "/sys/devices/virtual/thermal/thermal_message/cpu_limits" ] && chmod 0644 /sys/devices/virtual/thermal/thermal_message/cpu_limits 2>/dev/null
+}
+
+apply_schedutil_ratelimits() {
+  _asr_prof="${1:-$GLOBAL_PROFILE}"
+  case "$_asr_prof" in
+    gaming)      _l_up=400;  _l_down=18000; _b_up=600;  _b_down=14000 ;;
+    performance) _l_up=300;  _l_down=20000; _b_up=500;  _b_down=15000 ;;
+    powersave)   _l_up=2000; _l_down=5000;  _b_up=3000; _b_down=4000  ;;
+    balanced|*)  _l_up=500;  _l_down=15000; _b_up=1000; _b_down=10000 ;;
+  esac
+
+  _idx=0
+  for _pol in /sys/devices/system/cpu/cpufreq/policy*; do
+    [ -d "$_pol/schedutil" ] || continue
+    if [ "$_idx" -eq 0 ]; then
+      safe_write_node "SCHEDUTIL" "$_pol/schedutil/up_rate_limit_us" "$_l_up"
+      safe_write_node "SCHEDUTIL" "$_pol/schedutil/down_rate_limit_us" "$_l_down"
+    else
+      safe_write_node "SCHEDUTIL" "$_pol/schedutil/up_rate_limit_us" "$_b_up"
+      safe_write_node "SCHEDUTIL" "$_pol/schedutil/down_rate_limit_us" "$_b_down"
+    fi
+    _idx=$((_idx + 1))
+  done
+}
+
+update_module_desc() {
+  _umd_eff=$(echo "${1:-$GLOBAL_PROFILE}" | tr 'a-z' 'A-Z')
+  _umd_src="${2:-GLOBAL_PROFILE}"
+  _umd_tstate=$(cat "$STATE_DIR/thermal_state" 2>/dev/null || echo "NORMAL")
+  if [ -f "$MODDIR/module.prop" ]; then
+    sed -i "s/^description=.*/description=[Arbiter: ${_umd_eff} (${_umd_src}) | EEM: ${VOLT_PROFILE:-CONSERVATIVE} | Thermal: ${_umd_tstate}] Ocore v3.2.0-NextGen Unified Performance Engine/" "$MODDIR/module.prop" 2>/dev/null
+  fi
+}
+
+evaluate_and_apply_arbiter() {
+  validate_and_load_config
+  unlock_cpu_nodes
+
+  therm_state=$(cat "$STATE_DIR/thermal_state" 2>/dev/null || echo "NORMAL")
+  active_game=$(cat "$STATE_DIR/active_game_pkg" 2>/dev/null | tr -d '[:space:]')
+  screen_off=$(cat "$STATE_DIR/screen_off_state" 2>/dev/null | tr -d '[:space:]')
+
+  winning_tier="5:GLOBAL_PROFILE"
+  effective_prof="${GLOBAL_PROFILE:-balanced}"
+
+  # Priority 6: Background / Screen-Off Optimization
+  if [ "$screen_off" = "1" ]; then
+    winning_tier="6:BACKGROUND_OPT"
+    effective_prof="powersave"
+  fi
+
+  # Priority 5: Global Performance Profile (overrides background when screen is on)
+  if [ "$screen_off" != "1" ]; then
+    winning_tier="5:GLOBAL_PROFILE"
+    effective_prof="${GLOBAL_PROFILE:-balanced}"
+  fi
+
+  # Priority 4: User Manual Override
+  if [ -n "$USER_MANUAL_OVERRIDE" ] && [ "$USER_MANUAL_OVERRIDE" != "none" ]; then
+    winning_tier="4:USER_MANUAL_OVERRIDE"
+    effective_prof="$USER_MANUAL_OVERRIDE"
+  fi
+
+  # Priority 3: Verified Gaming Session (Takes precedence unless overridden by Priority 1 or 2)
+  if [ -n "$active_game" ] && [ "${GAME_DETECT_MODE:-auto}" != "disabled" ]; then
+    winning_tier="3:VERIFIED_GAMING_SESSION($active_game)"
+    effective_prof="gaming"
+    if [ -f "$STATE_DIR/per_game/${active_game}.conf" ]; then
+      . "$STATE_DIR/per_game/${active_game}.conf"
+      [ -n "$GAME_PROFILE" ] && effective_prof="$GAME_PROFILE"
+    fi
+  fi
+
+  # Priority 2: Critical Battery Protection & Safety Recovery
+  crit_bat=$(cat "$STATE_DIR/critical_battery_state" 2>/dev/null | tr -dc '0-9')
+  if [ "$crit_bat" = "1" ]; then
+    winning_tier="2:CRITICAL_BATTERY_PROTECTION"
+    effective_prof="powersave"
+  fi
+  if [ "${SAFE_MODE:-0}" = "1" ]; then
+    winning_tier="2:SAFETY_RECOVERY"
+    effective_prof="balanced"
+  fi
+
+  # Priority 1: Thermal Protection (Highest Priority — overrides everything!)
+  case "$therm_state" in
+    EMERGENCY|CRITICAL)
+      winning_tier="1:THERMAL_PROTECTION($therm_state)"
+      effective_prof="powersave"
+      ;;
+    HOT)
+      if [ "$effective_prof" = "gaming" ] || [ "$effective_prof" = "performance" ]; then
+        winning_tier="1:THERMAL_PROTECTION(HOT_STEPDOWN)"
+        effective_prof="balanced"
+      fi
+      ;;
+    WARM)
+      if [ "$effective_prof" = "gaming" ]; then
+        winning_tier="1:THERMAL_PROTECTION(WARM_STEPDOWN)"
+        effective_prof="performance"
+      fi
+      ;;
+  esac
+
+  prev_eff=$(cat "$STATE_DIR/effective_profile" 2>/dev/null)
+  prev_tier=$(cat "$STATE_DIR/arbiter_winning_tier" 2>/dev/null)
+  echo "$effective_prof" > "$STATE_DIR/effective_profile"
+  echo "$winning_tier" > "$STATE_DIR/arbiter_winning_tier"
+
+  log_event "INFO" "ARBITER" "Resolved profile='$effective_prof' via Priority [$winning_tier] (prev=${prev_eff:-none})"
+
+  # Save runtime state separately from permanent config (Section 3 compliance)
+  cat << EORS > "$OCORE_DIR/runtime/runtime_state.env"
+EFFECTIVE_PROFILE=$effective_prof
+ARBITER_WINNING_TIER=$winning_tier
+THERMAL_STATE=$therm_state
+ACTIVE_GAME=${active_game:-None}
+SCREEN_OFF=${screen_off:-0}
+UPDATED_TS=$(date '+%s')
+EORS
+
+  # Apply Thermal Subsystem (Skip kernel writes when in monitor_only or oem_stock mode)
+  _t_prof="$effective_prof"
+  [ "$_t_prof" = "custom" ] && _t_prof="balanced"
+  if { [ "$THERMAL_ENGINE" = "ocore_intel" ] || [ "$THERMAL_ENGINE" = "ocore_mtk" ]; } && [ -x "$MODDIR/system/bin/thermod" ]; then
+    "$MODDIR/system/bin/thermod" apply_temp "$_t_prof" >/dev/null 2>&1
+  elif [ "$THERMAL_ENGINE" = "ocore_lite" ] || [ "$THERMAL_ENGINE" = "ocore_extreme" ]; then
+    case "$effective_prof" in
+      gaming|performance) sh "$MODDIR/cortex/thermal/ocore-thermal2.sh" >/dev/null 2>&1 ;;
+      balanced)           sh "$MODDIR/cortex/thermal/ocore-thermal-lite2.sh" >/dev/null 2>&1 ;;
+      powersave)          sh "$MODDIR/cortex/thermal/enable.sh" >/dev/null 2>&1 ;;
+    esac
+  fi
+
+  # Apply CPU/GPU Subsystem
+  case "$effective_prof" in
+    gaming|performance) az_prof=1; rr_mode="perf" ;;
+    balanced)           az_prof=2; rr_mode="balance" ;;
+    powersave)          az_prof=3; rr_mode="psave" ;;
+    custom)             az_prof=2; rr_mode="custom" ;;
+    *)                  az_prof=2; rr_mode="balance"; effective_prof="balanced" ;;
+  esac
+
+  echo "$az_prof" > "$AZ_CONF_DIR/API/current_profile" 2>/dev/null
+  [ -d "/data/data/zx.ocore/API" ] && echo "$az_prof" > "/data/data/zx.ocore/API/current_profile" 2>/dev/null
+
+  if [ "$CPU_ENGINE" != "stock" ]; then
+    echo "$rr_mode" > "$MODDIR/cortex/thunderclash/current_mode"
+    case "$rr_mode" in
+      perf)    sh "$MODDIR/cortex/thunderclash/perf1.sh" >>"$DAEMON_LOG" 2>&1 & ;;
+      balance) sh "$MODDIR/cortex/thunderclash/balance1.sh" >>"$DAEMON_LOG" 2>&1 & ;;
+      psave)   sh "$MODDIR/cortex/thunderclash/psave1.sh" >>"$DAEMON_LOG" 2>&1 & ;;
+      custom)  apply_custom_cpu_profile >>"$DAEMON_LOG" 2>&1 ;;
+    esac
+  fi
+
+  if [ "${SCHEDUTIL_TUNE_ENABLE:-1}" = "1" ]; then
+    apply_schedutil_ratelimits "$effective_prof"
+  fi
+
+  update_module_desc "$effective_prof" "$winning_tier"
+  log_tx "APPLIED" "arbiter_resolve" "Active=$effective_prof (Priority=$winning_tier)"
+  echo "[OK] Arbiter applied '$effective_prof' (Winner: $winning_tier)"
+}
+
+set_global_profile() {
+  _sgp_target=$(sanitize_token "$1")
+  case "$_sgp_target" in
+    powersave|balanced|performance|gaming|custom)
+      save_ocore_key "GLOBAL_PROFILE" "$_sgp_target"
+      evaluate_and_apply_arbiter
+      ;;
+    *)
+      log_tx "FAILED" "profile" "Invalid profile '$_sgp_target'"
+      echo "[ERROR] Invalid profile: $_sgp_target"
+      return 1
+      ;;
+  esac
+}
+
+set_manual_override() {
+  _smo_ovr=$(sanitize_token "${1:-none}")
+  case "$_smo_ovr" in
+    none|powersave|balanced|performance|gaming|custom)
+      save_ocore_key "USER_MANUAL_OVERRIDE" "$_smo_ovr"
+      evaluate_and_apply_arbiter
+      ;;
+    *)
+      log_tx "FAILED" "manual_override" "Invalid override '$_smo_ovr'"
+      echo "[ERROR] Invalid manual override: $_smo_ovr"
+      return 1
+      ;;
+  esac
+}
+
+# ==============================================================================
+# 4. ADVANCED GAME DETECTION, STATE MACHINE & PRE-GAME SNAPSHOT / RESTORATION
+# ==============================================================================
+enter_game_session() {
+  _egs_pkg=$(sanitize_token "$1")
+  if ! validate_package_name "$_egs_pkg"; then
+    log_event "WARN" "GAMING" "Rejected invalid or system package for game session: $_egs_pkg"
+    return 1
+  fi
+  if ! is_package_in_gamelist "$_egs_pkg"; then
+    log_event "WARN" "GAMING" "Rejected package not in cortex/thunderclash/gamelist.txt: $_egs_pkg"
+    echo "[ERROR] Package $_egs_pkg is not registered in GameList (cortex/thunderclash/gamelist.txt)"
+    return 1
+  fi
+  validate_and_load_config
+
+  _egs_pid=$(/system/bin/toybox pidof "$_egs_pkg" 2>/dev/null | awk '{print $1}')
+  write_game_session_state "GAME_DETECTED" "$_egs_pkg" "${_egs_pid:-0}" "0" "EnterGameRequested"
+
+  if [ ! -f "$STATE_DIR/pre_game_snapshot.env" ]; then
+    cat << EOS > "$STATE_DIR/pre_game_snapshot.env"
+PRE_GLOBAL_PROFILE=$GLOBAL_PROFILE
+PRE_TOUCH_LEVEL=$TOUCH_LEVEL
+PRE_REFRESH_IDX=$REFRESH_IDX
+PRE_RENDER_MODE=$RENDER_MODE
+PRE_DND_STATE=$(settings get global zen_mode 2>/dev/null | tr -dc '0-9')
+EOS
+  fi
+
+  echo "$_egs_pkg" > "$MODDIR/cortex/thunderclash/game-active.txt"
+  echo "$_egs_pkg" > "$STATE_DIR/active_game_pkg"
+  date '+%s' > "$STATE_DIR/active_game_start_ts"
+  write_game_session_state "GAME_VALIDATED" "$_egs_pkg" "${_egs_pid:-0}" "1" "GameValidated"
+
+  if [ -f "$STATE_DIR/spoof_bindings/${_egs_pkg}.env" ]; then
+    MODDIR_OVERRIDE="$MODDIR" OCORE_DIR_OVERRIDE="$OCORE_DIR" sh "$MODDIR/cortex/ocore_json_tool.sh" apply_pkg "$_egs_pkg" >/dev/null 2>&1
+  fi
+
+  if [ "${GAME_DETECT_MODE}" = "per_game" ] && [ -f "$STATE_DIR/per_game/${_egs_pkg}.conf" ]; then
+    . "$STATE_DIR/per_game/${_egs_pkg}.conf"
+    [ -n "$GAME_TOUCH" ] && sh "$MODDIR/cortex/thunderclash/touch.sh" "$GAME_TOUCH" >/dev/null 2>&1
+    [ -n "$GAME_REFRESH" ] && [ "$GAME_REFRESH" != "-1" ] && sh "$MODDIR/cortex/thunderclash/refresh.sh" "$GAME_REFRESH" >/dev/null 2>&1
+  fi
+
+  [ "${SMART_RESOURCE_MGR:-1}" = "1" ] && apply_smart_gaming_resources
+  evaluate_and_apply_arbiter >/dev/null 2>&1
+  sh "$MODDIR/gate.sh" >/dev/null 2>&1 &
+  sh "$MODDIR/cortex/thunderclash/ocore.sh" >/dev/null 2>&1 &
+  [ "${GAME_DND_ENABLE:-0}" = "1" ] && sh "$MODDIR/cortex/thunderclash/dnd.sh" --enable >/dev/null 2>&1
+
+  # Start On-Demand FPS Monitor Daemon for this active game session
+  if [ "${AUTO_FLOATING_HUD:-1}" = "1" ] || [ "${OCORE_FPSMON_ENABLE:-0}" = "1" ]; then
+    chmod 0755 "$MODDIR/system/bin/ocore-fps-daemon" 2>/dev/null
+    nohup /system/bin/sh "$MODDIR/system/bin/ocore-fps-daemon" >>"$DAEMON_LOG" 2>&1 &
+  fi
+
+  write_game_session_state "OVERLAY_ACTIVE" "$_egs_pkg" "${_egs_pid:-0}" "1" "OverlayActive"
+
+  # Notify companion Android app OverlayService if installed and AUTO_FLOATING_HUD=1
+  if [ "${AUTO_FLOATING_HUD:-1}" = "1" ] && command -v am >/dev/null 2>&1; then
+    am start-foreground-service -n id.ocore.gamecontrol/.OverlayService       -a id.ocore.gamecontrol.ACTION_GAME_ENTER       --es extra_game_pkg "$_egs_pkg" >/dev/null 2>&1 &
+  fi
+
+  log_tx "APPLIED" "game_enter" "Entered validated game session for $_egs_pkg"
+  echo "[OK] Entered game session for $_egs_pkg (SESSION_STATE=OVERLAY_ACTIVE)"
+}
+
+exit_game_session() {
+  validate_and_load_config
+  _xgs_pkg=$(cat "$STATE_DIR/active_game_pkg" 2>/dev/null | tr -d '[:space:]')
+  [ "$_xgs_pkg" = "None" ] && _xgs_pkg=""
+
+  write_game_session_state "GAME_EXITED" "${_xgs_pkg:-None}" "0" "0" "GameExited"
+
+  : > "$MODDIR/cortex/thunderclash/game-active.txt"
+  : > "$STATE_DIR/active_game_pkg"
+  rm -f "$STATE_DIR/active_game_start_ts" "$STATE_DIR/frame_stats.cache" "$STATE_DIR/frame_stats.cache.tmp" 2>/dev/null
+
+  # Stop On-Demand FPS Monitor Daemon immediately so zero FPS sampling runs when idle
+  graceful_stop_proc "ocore-fps-daemon" "$STATE_DIR/pid_ocore_fpsmon"
+
+  # Restore per-PID nice, ionice, oom_score_adj, cpuset, and stune with PID identity check
+  sh "$MODDIR/cortex/thunderclash/ocore.sh" --restore >/dev/null 2>&1
+
+  # Restore Smart Resource Manager baseline
+  restore_smart_gaming_resources
+
+  if [ -f "$STATE_DIR/pre_game_snapshot.env" ]; then
+    . "$STATE_DIR/pre_game_snapshot.env"
+    [ -n "$PRE_TOUCH_LEVEL" ] && sh "$MODDIR/cortex/thunderclash/touch.sh" "$PRE_TOUCH_LEVEL" >/dev/null 2>&1
+    [ -n "$PRE_REFRESH_IDX" ] && sh "$MODDIR/cortex/thunderclash/refresh.sh" "$PRE_REFRESH_IDX" >/dev/null 2>&1
+    if [ -n "$PRE_RENDER_MODE" ]; then
+      echo "$PRE_RENDER_MODE" > "$RR_TMP_DIR/render/status.txt" 2>/dev/null
+      echo "$PRE_RENDER_MODE" > "$STATE_DIR/renderer_state.txt" 2>/dev/null
+      echo "$PRE_RENDER_MODE" > "$MODDIR/render/status.txt" 2>/dev/null
+      sh "$MODDIR/break.sh" >/dev/null 2>&1 &
+    fi
+    if [ "${GAME_DND_ENABLE:-0}" = "1" ] && [ "${PRE_DND_STATE:-0}" = "0" ]; then
+      sh "$MODDIR/cortex/thunderclash/dnd.sh" --disable >/dev/null 2>&1
+    fi
+    rm -f "$STATE_DIR/pre_game_snapshot.env" 2>/dev/null
+  fi
+
+  write_game_session_state "OVERLAY_HIDDEN" "None" "0" "0" "OverlayHidden"
+
+  # Dismiss companion Android app Floating Pill immediately
+  if command -v am >/dev/null 2>&1; then
+    am startservice -n id.ocore.gamecontrol/.OverlayService       -a id.ocore.gamecontrol.ACTION_GAME_EXIT >/dev/null 2>&1 &
+  fi
+
+  evaluate_and_apply_arbiter >/dev/null 2>&1
+  write_game_session_state "IDLE" "None" "0" "0" "IdleRestored"
+  log_event "INFO" "GAMING" "Exited game session (${_xgs_pkg:-none}); restored pre-game configuration & stopped FPS monitor"
+  log_tx "APPLIED" "game_exit" "Exited game session (${_xgs_pkg:-none}) and restored baseline"
+  echo "[OK] Exited game session and restored pre-game configuration (SESSION_STATE=IDLE)"
+}
+
+# ==============================================================================
+# 5. MULTI-SOURCE FRAME STABILITY & INTELLIGENT FPS TELEMETRY (Priority 1.4)
+# ==============================================================================
+get_frame_stability_stats() {
+  _gfs_mode="${1:-}"
+  _now_sec=$(date '+%s')
+  _now_ms="${_now_sec}000"
+  _disp_hz=$(get_active_display_hz_int)
+  _target_fps="$_disp_hz"
+
+  _gfs_pkg=$(cat "$STATE_DIR/active_game_pkg" 2>/dev/null | tr -d '[:space:]')
+  [ "$_gfs_pkg" = "None" ] && _gfs_pkg=""
+  [ -z "$_gfs_pkg" ] && _gfs_pkg=$(cat "$MODDIR/cortex/thunderclash/game-active.txt" 2>/dev/null | tr -d '[:space:]')
+
+  _gfs_dur="0m"
+  if [ -f "$STATE_DIR/active_game_start_ts" ]; then
+    _st_ts=$(cat "$STATE_DIR/active_game_start_ts" 2>/dev/null | tr -dc '0-9')
+    [ -n "$_st_ts" ] && _gfs_dur="$(( (_now_sec - _st_ts) / 60 ))m $(( (_now_sec - _st_ts) % 60 ))s"
+  fi
+
+  _sess_state="IDLE"
+  _ovl_allowed="0"
+  if [ -f "$STATE_DIR/game_session_state.env" ]; then
+    . "$STATE_DIR/game_session_state.env" 2>/dev/null
+    _sess_state="${SESSION_STATE:-IDLE}"
+    _ovl_allowed="${OVERLAY_ALLOWED:-0}"
+  fi
+
+  # Validate that active package is in canonical GameList and process is alive
+  if [ -z "$_gfs_pkg" ] || ! is_package_in_gamelist "$_gfs_pkg"; then
+    echo "FRAME_PROVENANCE=UNAVAILABLE"
+    echo "FPS_SOURCE=Idle (No active validated game from GameList)"
+    echo "OBSERVED_FPS=-- FPS"
+    echo "FPS_NUMERIC=-1"
+    echo "FPS_STATUS_COLOR=GRAY"
+    echo "DISPLAY_HZ=${_disp_hz}"
+    echo "TARGET_FPS=${_target_fps}"
+    echo "SESSION_STATE=IDLE"
+    echo "OVERLAY_ALLOWED=0"
+    echo "ACTIVE_GAME_PKG=None"
+    echo "AVG_FRAME_DURATION_MS=UNAVAILABLE"
+    echo "TOTAL_FRAMES=0"
+    echo "JANKY_FRAMES=0"
+    echo "JANK_PCT=0.0%"
+    echo "P50_MS=UNAVAILABLE"
+    echo "P90_MS=UNAVAILABLE"
+    echo "P95_MS=UNAVAILABLE"
+    echo "P99_MS=UNAVAILABLE"
+    echo "SESSION_DURATION=0m"
+    echo "SAMPLE_TIMESTAMP_MS=$_now_ms"
+    return 0
+  fi
+
+  # Verify game process is still alive (crash recovery guard) — allow mock testing override
+  _gfs_pid=$(/system/bin/toybox pidof "$_gfs_pkg" 2>/dev/null | awk '{print $1}')
+  if [ -z "$_gfs_pid" ] && [ "${OCORE_TEST_MOCK_PID:-0}" != "1" ]; then
+    exit_game_session >/dev/null 2>&1
+    echo "FRAME_PROVENANCE=UNAVAILABLE"
+    echo "FPS_SOURCE=Game process terminated ($_gfs_pkg)"
+    echo "OBSERVED_FPS=-- FPS"
+    echo "FPS_NUMERIC=-1"
+    echo "FPS_STATUS_COLOR=GRAY"
+    echo "DISPLAY_HZ=${_disp_hz}"
+    echo "TARGET_FPS=${_target_fps}"
+    echo "SESSION_STATE=IDLE"
+    echo "OVERLAY_ALLOWED=0"
+    echo "ACTIVE_GAME_PKG=None"
+    echo "AVG_FRAME_DURATION_MS=UNAVAILABLE"
+    echo "TOTAL_FRAMES=0"
+    echo "JANKY_FRAMES=0"
+    echo "JANK_PCT=0.0%"
+    echo "P50_MS=UNAVAILABLE"
+    echo "P90_MS=UNAVAILABLE"
+    echo "P95_MS=UNAVAILABLE"
+    echo "P99_MS=UNAVAILABLE"
+    echo "SESSION_DURATION=$_gfs_dur"
+    echo "SAMPLE_TIMESTAMP_MS=$_now_ms"
+    return 0
+  fi
+
+  # Check if a fresh sample (< 4 seconds old) is already in frame_stats.cache (when not called with --direct)
+  if [ "$_gfs_mode" != "--direct" ] && [ -f "$STATE_DIR/frame_stats.cache" ]; then
+    _cache_pkg=$(awk -F= '/^ACTIVE_GAME_PKG=/ {print $2; exit}' "$STATE_DIR/frame_stats.cache" 2>/dev/null)
+    _cache_ts=$(awk -F= '/^SAMPLE_TIMESTAMP_MS=/ {print $2; exit}' "$STATE_DIR/frame_stats.cache" 2>/dev/null | tr -dc '0-9')
+    _cache_sec=$(( ${_cache_ts:-0} / 1000 ))
+    if [ "$_cache_pkg" = "$_gfs_pkg" ] && [ "$((_now_sec - _cache_sec))" -le 4 ] 2>/dev/null; then
+      cat "$STATE_DIR/frame_stats.cache"
+      return 0
+    fi
+  fi
+
+  # Priority 1 & 2: Try SurfaceFlinger / FrameTimeline telemetry first
+  sf_sample=$(sample_surfaceflinger_fps "$_gfs_pkg" 2>/dev/null)
+  sf_fps=""
+  sf_avg_ms=""
+  sf_jank=""
+  sf_cnt=""
+  if [ -n "$sf_sample" ]; then
+    sf_fps=$(echo "$sf_sample" | cut -d'|' -f2)
+    sf_avg_ms=$(echo "$sf_sample" | cut -d'|' -f3)
+    sf_jank=$(echo "$sf_sample" | cut -d'|' -f4)
+    sf_cnt=$(echo "$sf_sample" | cut -d'|' -f5)
+  fi
+
+  # Priority 3: Query dumpsys gfxinfo <pkg> framestats for P50/P90/P95/P99 and fallback FPS
+  gfx_out=$(dumpsys gfxinfo "$_gfs_pkg" framestats 2>/dev/null)
+  tot_f=$(echo "$gfx_out" | awk -F': ' '/Total frames rendered:/ {print $2; exit}' | tr -dc '0-9')
+  jank_line=$(echo "$gfx_out" | awk '/Janky frames:/ {print; exit}')
+  jank_f=$(echo "$jank_line" | awk '{print $3}' | tr -dc '0-9')
+  jank_pct=$(echo "$jank_line" | grep -o '([0-9.]*%)' | tr -d '()')
+  p50=$(echo "$gfx_out" | awk -F': ' '/50th percentile:/ {print $2; exit}')
+  p90=$(echo "$gfx_out" | awk -F': ' '/90th percentile:/ {print $2; exit}')
+  p95=$(echo "$gfx_out" | awk -F': ' '/95th percentile:/ {print $2; exit}')
+  p99=$(echo "$gfx_out" | awk -F': ' '/99th percentile:/ {print $2; exit}')
+
+  prof_stats=$(echo "$gfx_out" | awk -F',' '
+    /---PROFILEDATA---/ { in_prof = !in_prof; next }
+    in_prof && $1 == "0" && $2 > 0 && $14 > $2 {
+      dur_ms = ($14 - $2) / 1000000.0
+      if (dur_ms > 0.5 && dur_ms < 500.0) {
+        n++
+        sum_ms += dur_ms
+        if (first_vsync == 0 || $2 < first_vsync) first_vsync = $2
+        if ($14 > last_done) last_done = $14
+      }
+    }
+    END {
+      if (n >= 6) {
+        avg_ms = sum_ms / n
+        wall_s = (last_done - first_vsync) / 1000000000.0
+        fps = (wall_s > 0.1) ? (n / wall_s) : 0
+        if (fps > 0 && fps <= 240) {
+          printf "SAMPLES=%d|AVG_MS=%.2f ms|FPS=%.0f FPS|NUM=%.1f
+", n, avg_ms, fps, fps
+        } else {
+          print "SAMPLES=0|AVG_MS=UNAVAILABLE|FPS=-- FPS|NUM=-1"
+        }
+      } else {
+        print "SAMPLES=0|AVG_MS=UNAVAILABLE|FPS=-- FPS|NUM=-1"
+      }
+    }
+  ')
+
+  avg_ms=$(echo "$prof_stats" | cut -d'|' -f2 | cut -d= -f2)
+  obs_fps=$(echo "$prof_stats" | cut -d'|' -f3 | cut -d= -f2)
+  fps_num=$(echo "$prof_stats" | cut -d'|' -f4 | cut -d= -f2)
+  fps_src="dumpsys gfxinfo $_gfs_pkg framestats"
+  prov="ACTUAL"
+
+  # Prefer SurfaceFlinger present-timestamp telemetry when available or when gfxinfo has no profile samples (e.g. Vulkan/SurfaceView)
+  if [ -n "$sf_fps" ]; then
+    sf_int=$(printf "%s" "$sf_fps" | awk '{printf "%d", $0 + 0.5}')
+    obs_fps="${sf_int} FPS"
+    fps_num="$sf_fps"
+    [ "$avg_ms" = "UNAVAILABLE" ] && avg_ms="${sf_avg_ms} ms"
+    [ -z "$jank_pct" ] && jank_pct="$sf_jank"
+    [ "${tot_f:-0}" -eq 0 ] 2>/dev/null && tot_f="$sf_cnt"
+    fps_src="SurfaceFlinger --latency ($_gfs_pkg)"
+    prov="ACTUAL"
+  elif [ "$obs_fps" = "-- FPS" ] || [ -z "$obs_fps" ] || [ "$obs_fps" = "UNAVAILABLE" ]; then
+    obs_fps="-- FPS"
+    fps_num="-1"
+    if [ "${tot_f:-0}" -lt 30 ] 2>/dev/null; then
+      prov="INSUFFICIENT_SAMPLES(${tot_f:-0}<30)"
+      fps_src="gfxinfo fallback (waiting for frame buffer / native Vulkan surface)"
+    else
+      prov="UNAVAILABLE"
+      fps_src="gfxinfo fallback (native SurfaceView/Vulkan bypasses HWUI framestats)"
+    fi
+  fi
+
+  fps_color=$(classify_fps_status_color "$fps_num" "$_target_fps" "$prov")
+  [ "$prov" = "ACTUAL" ] && record_fps_history_sample "$_gfs_pkg" "$fps_num" "${p50:-0}" "${p95:-0}" "${jank_pct:-0.0%}" "$fps_src"
+
+  echo "FRAME_PROVENANCE=$prov"
+  echo "FPS_SOURCE=$fps_src"
+  echo "OBSERVED_FPS=${obs_fps:--- FPS}"
+  echo "FPS_NUMERIC=${fps_num:--1}"
+  echo "FPS_STATUS_COLOR=${fps_color:-GRAY}"
+  echo "DISPLAY_HZ=${_disp_hz}"
+  echo "TARGET_FPS=${_target_fps}"
+  echo "SESSION_STATE=${_sess_state:-OVERLAY_ACTIVE}"
+  echo "OVERLAY_ALLOWED=${_ovl_allowed:-1}"
+  echo "ACTIVE_GAME_PKG=${_gfs_pkg}"
+  echo "AVG_FRAME_DURATION_MS=${avg_ms:-UNAVAILABLE}"
+  echo "TOTAL_FRAMES=${tot_f:-0}"
+  echo "JANKY_FRAMES=${jank_f:-0}"
+  echo "JANK_PCT=${jank_pct:-0.0%}"
+  echo "P50_MS=${p50:-UNAVAILABLE}"
+  echo "P90_MS=${p90:-UNAVAILABLE}"
+  echo "P95_MS=${p95:-UNAVAILABLE}"
+  echo "P99_MS=${p99:-UNAVAILABLE}"
+  echo "SESSION_DURATION=$_gfs_dur"
+  echo "SAMPLE_TIMESTAMP_MS=$_now_ms"
+}
+
+# ==============================================================================
+# 6. OCORE PERFORMANCE INTELLIGENCE
+# ==============================================================================
+read_live_gpu_load_pct() {
+  _gl_pct=0
+  if [ -f "/sys/module/ged/parameters/gpu_loading" ]; then
+    read -r _gl_pct < /sys/module/ged/parameters/gpu_loading 2>/dev/null || _gl_pct=0
+  fi
+  case "$_gl_pct" in
+    ""|"0"|*[!0-9]*)
+      if [ -f "/sys/kernel/ged/hal/gpu_utilization" ]; then
+        read -r _gl_pct _ < /sys/kernel/ged/hal/gpu_utilization 2>/dev/null || _gl_pct=0
+      elif [ -f "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage" ]; then
+        read -r _gl_pct _ < /sys/class/kgsl/kgsl-3d0/gpu_busy_percentage 2>/dev/null || _gl_pct=0
+      fi
+      ;;
+  esac
+  case "$_gl_pct" in
+    ""|*[!0-9]*) _gl_pct=0 ;;
+  esac
+  echo "${_gl_pct:-0}"
+}
+
+compute_performance_intelligence() {
+  [ -z "$GLOBAL_PROFILE" ] && [ -f "$OCORE_CONF" ] && . "$OCORE_CONF" 2>/dev/null
+  therm_state="${THERM_STATE:-NORMAL}"
+  [ -z "$therm_state" ] && [ -f "$STATE_DIR/thermal_state" ] && read -r therm_state < "$STATE_DIR/thermal_state" 2>/dev/null
+  active_game="${ACTIVE_GAME:-}"
+  [ "$active_game" = "None" ] && active_game=""
+  batt_cap="${BATT_CAP:-50}"
+  case "$batt_cap" in ""|*[!0-9]*) batt_cap=50 ;; esac
+  batt_status="${BATT_STATUS:-Discharging}"
+
+  cores="${HW_TOTAL_CORES:-8}"
+  case "$cores" in ""|"0"|*[!0-9]*) cores=8 ;; esac
+  _l1="1.00"
+  [ -f "/proc/loadavg" ] && read -r _l1 _ < /proc/loadavg 2>/dev/null
+  _l_int="${_l1%%.*}${_l1#*.}"
+  _l_int="${_l_int#${_l_int%%[!0]*}}"
+  case "$_l_int" in ""|*[!0-9]*) _l_int=0 ;; esac
+  cpu_util_pct=$(( _l_int / cores ))
+  [ "$cpu_util_pct" -gt 100 ] && cpu_util_pct=100
+
+  gpu_util_pct="${g_load:-0}"
+  case "$gpu_util_pct" in ""|*[!0-9]*) gpu_util_pct=0 ;; esac
+  ram_pct="${RAM_PCT:-50}"
+  case "$ram_pct" in ""|*[!0-9]*) ram_pct=50 ;; esac
+
+  score=$(( (cpu_util_pct * 40 + gpu_util_pct * 35 + ram_pct * 25) / 100 ))
+  reasons=""
+
+  if [ -n "$active_game" ]; then
+    score=$((score + 30))
+    reasons="${reasons}ActiveGame($active_game)+30; "
+  fi
+
+  if [ "$batt_cap" -le 20 ] && [ "$batt_status" != "Charging" ]; then
+    score=$((score - 35))
+    reasons="${reasons}LowBattery(${batt_cap}%)-35; "
+  fi
+
+  case "$therm_state" in
+    EMERGENCY|CRITICAL)
+      score=5
+      reasons="${reasons}ThermalEmergency($therm_state)->ForcePowersave; "
+      ;;
+    HOT)
+      score=$((score - 40))
+      reasons="${reasons}ThermalHot->CapBalanced; "
+      ;;
+    WARM)
+      score=$((score - 15))
+      reasons="${reasons}ThermalWarm-15; "
+      ;;
+    *)
+      reasons="${reasons}ThermalNormal; "
+      ;;
+  esac
+
+  [ "$score" -lt 0 ] && score=0
+  [ "$score" -gt 100 ] && score=100
+
+  if [ "$therm_state" = "CRITICAL" ] || [ "$therm_state" = "EMERGENCY" ] || { [ "$batt_cap" -le 15 ] && [ "$batt_status" != "Charging" ]; }; then
+    rec="powersave"; conf="HIGH"
+  elif [ "$therm_state" = "HOT" ]; then
+    rec="balanced"; conf="HIGH"
+  elif [ -n "$active_game" ] && [ "$therm_state" = "NORMAL" ]; then
+    rec="gaming"; conf="HIGH"
+  elif [ "$score" -ge 72 ]; then
+    rec="performance"; conf="MEDIUM"
+  elif [ "$score" -le 25 ]; then
+    rec="powersave"; conf="MEDIUM"
+  else
+    rec="balanced"; conf="HIGH"
+  fi
+
+  echo "INTEL_SCORE=$score"
+  echo "INTEL_RECOMMENDED=$rec"
+  echo "INTEL_CONFIDENCE=$conf"
+  echo "INTEL_REASONS=${reasons%; }"
+}
+
+# ==============================================================================
+# 9. OCORE RECOVERY CENTER
+# ==============================================================================
+run_recovery_action() {
+  _rra_act=$(sanitize_token "$1")
+  case "$_rra_act" in
+    emergency_safe_mode)
+      save_ocore_key "SAFE_MODE" "1"
+      save_ocore_key "USER_MANUAL_OVERRIDE" "none"
+      save_ocore_key "THUNDER_LOCK_FREQ" "0"
+      apply_eem_voltage "STOCK" >/dev/null 2>&1
+      "$MODDIR/system/bin/thermod" restore_stock >/dev/null 2>&1
+      evaluate_and_apply_arbiter >/dev/null 2>&1
+      log_tx "APPLIED" "recovery_emergency_safe_mode" "Activated Emergency Safe Mode (Stock EEM, Stock Thermal, Balanced CPU)"
+      echo "[OK] Emergency Safe Mode activated: EEM & Thermal restored to stock, Arbiter locked to Balanced."
+      ;;
+    bootloop_recovery)
+      echo "BOOTCOUNT=0" > "$MODDIR/count.sh"
+      rm -f "$MODDIR/disable" "$STATE_DIR/volt_rollback_triggered" 2>/dev/null
+      save_ocore_key "VOLT_PROFILE" "STOCK"
+      save_ocore_key "GLOBAL_PROFILE" "balanced"
+      log_tx "APPLIED" "recovery_bootloop" "Cleared bootloop counters and reset config to Stock/Balanced"
+      echo "[OK] Bootloop counter reset and safe Stock/Balanced profile armed."
+      ;;
+    config_restore)
+      restore_user_profile "${2:-default}"
+      ;;
+    kernel_node_restore)
+      unlock_cpu_nodes
+      sh "$MODDIR/cortex/cpu/norgov.sh" >/dev/null 2>&1
+      if [ -f "$BACKUP_DIR/kernel_nodes_initial.env" ]; then
+        while IFS='=' read -r _kn_k _kn_rest; do
+          case "$_kn_k" in \#*|"") continue ;; esac
+          _kn_path="${_kn_rest%%|*}"
+          _kn_val="${_kn_rest#*|}"
+          [ -e "$_kn_path" ] && [ -n "$_kn_val" ] && echo "$_kn_val" > "$_kn_path" 2>/dev/null
+        done < "$BACKUP_DIR/kernel_nodes_initial.env"
+      fi
+      log_tx "APPLIED" "recovery_kernel_nodes" "Restored initial kernel node baseline and unlocked CPU/GPU sysfs"
+      echo "[OK] Kernel nodes restored to initial boot baseline."
+      ;;
+    thermal_restore)
+      save_ocore_key "THERMAL_ENGINE" "stock"
+      save_ocore_key "ALLOW_TRIP_POINT_MOD" "0"
+      sh "$MODDIR/cortex/thermal/enable.sh" >/dev/null 2>&1
+      "$MODDIR/system/bin/thermod" restore_stock
+      ;;
+    restore_all_stock)
+      save_ocore_key "SAFE_MODE" "0"
+      save_ocore_key "USER_MANUAL_OVERRIDE" "none"
+      save_ocore_key "GLOBAL_PROFILE" "balanced"
+      apply_eem_voltage "STOCK" >/dev/null 2>&1
+      "$MODDIR/system/bin/thermod" restore_stock >/dev/null 2>&1
+      emergency_charging_recovery >/dev/null 2>&1
+      apply_renderer_pipeline "default" >/dev/null 2>&1
+      sh "$MODDIR/cortex/cpu/norgov.sh" >/dev/null 2>&1
+      evaluate_and_apply_arbiter >/dev/null 2>&1
+      log_tx "APPLIED" "recovery_restore_all_stock" "Restored Stock EEM, Stock Thermal, Stock CPU/GPU, Normal Charging & Default Renderer"
+      echo "[OK] Complete Stock Restoration finished (EEM, Thermal, CPU/GPU, Charging, Renderer)."
+      ;;
+    charging_restore)
+      emergency_charging_recovery
+      ;;
+    renderer_restore)
+      apply_renderer_pipeline "default"
+      ;;
+    spoof_restore)
+      reset_zygisk_spoof
+      ;;
+    eem_restore)
+      apply_eem_voltage "STOCK"
+      ;;
+    daemon_recovery)
+      rm -f "$STATE_DIR"/crash_* "$STATE_DIR"/cooldown_* "$AZ_CONF_DIR/java.lock" "$AZ_CONF_DIR/API/.lock" 2>/dev/null
+      validate_and_load_config
+      [ "${OCORE_BATTMON_ENABLE:-1}" = "1" ] && manage_daemon "ocore_battmon" "restart" >/dev/null 2>&1
+      [ "${OCORE_KTUNER_ENABLE:-1}" = "1" ] && manage_daemon "ocore_ktuner" "restart" >/dev/null 2>&1
+      [ "${OCORE_AI_ENABLE:-1}" = "1" ] && manage_daemon "ocore_ai" "restart" >/dev/null 2>&1
+      [ "${OCORE_FPSMON_ENABLE:-0}" = "1" ] && manage_daemon "ocore_fpsmon" "restart" >/dev/null 2>&1
+      log_tx "APPLIED" "recovery_daemons" "Cleared crash circuit-breakers and restarted enabled daemons"
+      echo "[OK] Cleared daemon cooldown locks and restarted enabled daemons."
+      ;;
+    diag_export)
+      export_diagnostic_bundle
+      ;;
+    *)
+      echo "Usage: ocorectl recovery <emergency_safe_mode|bootloop_recovery|config_restore|kernel_node_restore|thermal_restore|eem_restore|daemon_recovery|diag_export>"
+      return 1
+      ;;
+  esac
+}
+
+# ==============================================================================
+# ENGINE, DAEMON, MEMORY, NETWORK & ZYGISK SUBSYSTEMS
+# ==============================================================================
+apply_cpuset_eas_opt() {
+  _ace_state=$(sanitize_int "${1:-1}" "1")
+  save_ocore_key "CPUSET_EAS_OPT" "$_ace_state"
+
+  all_cpus="0-7"
+  [ -f "/sys/devices/system/cpu/present" ] && all_cpus=$(cat /sys/devices/system/cpu/present 2>/dev/null | tr -d '\r\n ')
+  little_cpus="0-3"
+  if [ -f "/sys/devices/system/cpu/cpufreq/policy0/related_cpus" ]; then
+    first_c=$(awk '{print $1}' /sys/devices/system/cpu/cpufreq/policy0/related_cpus 2>/dev/null)
+    last_c=$(awk '{print $NF}' /sys/devices/system/cpu/cpufreq/policy0/related_cpus 2>/dev/null)
+    [ -n "$first_c" ] && [ -n "$last_c" ] && little_cpus="${first_c}-${last_c}"
+  fi
+
+  if [ "$_ace_state" = "1" ]; then
+    [ -f "/proc/sys/kernel/sched_energy_aware" ] && safe_write_node "EAS" "/proc/sys/kernel/sched_energy_aware" "1"
+    [ -f "/sys/module/workqueue/parameters/power_efficient" ] && safe_write_node "EAS" "/sys/module/workqueue/parameters/power_efficient" "Y" "0644" "0" "1"
+    if [ -d "/dev/cpuset" ]; then
+      [ -f "/dev/cpuset/background/cpus" ] && safe_write_node "CPUSET" "/dev/cpuset/background/cpus" "$little_cpus"
+      [ -f "/dev/cpuset/system-background/cpus" ] && safe_write_node "CPUSET" "/dev/cpuset/system-background/cpus" "$little_cpus"
+      [ -f "/dev/cpuset/restricted/cpus" ] && safe_write_node "CPUSET" "/dev/cpuset/restricted/cpus" "$little_cpus"
+      [ -f "/dev/cpuset/foreground/cpus" ] && safe_write_node "CPUSET" "/dev/cpuset/foreground/cpus" "$all_cpus"
+      [ -f "/dev/cpuset/top-app/cpus" ] && safe_write_node "CPUSET" "/dev/cpuset/top-app/cpus" "$all_cpus"
+    fi
+    log_tx "APPLIED" "cpuset_eas" "Enabled EAS & Cpuset partitioning (BG=$little_cpus, TopApp=$all_cpus)"
+    echo "[OK] EAS & Cpuset Core Partitioning Enabled (BG=$little_cpus, TopApp=$all_cpus)"
+  else
+    if [ -d "/dev/cpuset" ]; then
+      [ -f "/dev/cpuset/background/cpus" ] && safe_write_node "CPUSET" "/dev/cpuset/background/cpus" "$all_cpus"
+      [ -f "/dev/cpuset/system-background/cpus" ] && safe_write_node "CPUSET" "/dev/cpuset/system-background/cpus" "$all_cpus"
+    fi
+    log_tx "APPLIED" "cpuset_eas" "Restored default Cpuset masks ($all_cpus)"
+    echo "[OK] EAS & Cpuset Partitioning Restored"
+  fi
+}
+
+apply_io_queue_opt() {
+  _aio_state=$(sanitize_int "${1:-1}" "1")
+  _aio_sched=$(sanitize_token "${2:-$IO_SCHEDULER}")
+  save_ocore_key "IO_QUEUE_OPT" "$_aio_state"
+  [ -n "$2" ] && save_ocore_key "IO_SCHEDULER" "$_aio_sched"
+
+  for _q in /sys/block/sda/queue /sys/block/sdb/queue /sys/block/sdc/queue /sys/block/mmcblk0/queue /sys/block/dm-0/queue; do
+    [ -d "$_q" ] || continue
+    if [ "$_aio_state" = "1" ]; then
+      [ -f "$_q/iostats" ] && safe_write_node "IO_OPT" "$_q/iostats" "0"
+      [ -f "$_q/add_random" ] && safe_write_node "IO_OPT" "$_q/add_random" "0"
+      [ -f "$_q/rq_affinity" ] && safe_write_node "IO_OPT" "$_q/rq_affinity" "2"
+      [ -f "$_q/read_ahead_kb" ] && safe_write_node "IO_OPT" "$_q/read_ahead_kb" "128"
+    else
+      [ -f "$_q/iostats" ] && safe_write_node "IO_OPT" "$_q/iostats" "1"
+      [ -f "$_q/read_ahead_kb" ] && safe_write_node "IO_OPT" "$_q/read_ahead_kb" "128"
+    fi
+    if [ -n "$_aio_sched" ] && [ "$_aio_sched" != "default" ] && [ -f "$_q/scheduler" ]; then
+      if grep -qw "$_aio_sched" "$_q/scheduler" 2>/dev/null; then
+        safe_write_node "IO_OPT" "$_q/scheduler" "$_aio_sched"
+      fi
+    fi
+  done
+  log_tx "APPLIED" "io_opt" "Updated Block I/O Queue (state=$_aio_state, scheduler=${_aio_sched:-default})"
+  echo "[OK] Storage I/O Optimizer updated (state=$_aio_state, scheduler=${_aio_sched:-default})"
+}
+
+set_cpu_engine() {
+  _sce_eng=$(sanitize_token "$1")
+  validate_and_load_config
+  unlock_cpu_nodes
+  case "$_sce_eng" in
+    ocore_ai|ocore_auto)
+      save_ocore_key "CPU_ENGINE" "ocore_ai"
+      save_ocore_key "THUNDER_LOCK_FREQ" "0"
+      setprop persist.sys.ocore__conf.AIenabled 1 2>/dev/null
+      echo 1 > "$AZ_CONF_DIR/API/current_modes"
+      sh "$MODDIR/cortex/cpu/norgov.sh" >>"$DAEMON_LOG" 2>&1 &
+      ;;
+    ocore_manual|ocore_static)
+      save_ocore_key "CPU_ENGINE" "ocore_manual"
+      save_ocore_key "THUNDER_LOCK_FREQ" "0"
+      setprop persist.sys.ocore__conf.AIenabled 0 2>/dev/null
+      echo 0 > "$AZ_CONF_DIR/API/current_modes"
+      evaluate_and_apply_arbiter >/dev/null 2>&1
+      ;;
+    ocore_lock|thunderclash)
+      save_ocore_key "CPU_ENGINE" "ocore_lock"
+      setprop persist.sys.ocore__conf.AIenabled 0 2>/dev/null
+      echo 0 > "$AZ_CONF_DIR/API/current_modes"
+      evaluate_and_apply_arbiter >/dev/null 2>&1
+      ;;
+    stock)
+      save_ocore_key "CPU_ENGINE" "stock"
+      save_ocore_key "THUNDER_LOCK_FREQ" "0"
+      setprop persist.sys.ocore__conf.AIenabled 0 2>/dev/null
+      sh "$MODDIR/cortex/cpu/norgov.sh" >>"$DAEMON_LOG" 2>&1 &
+      ;;
+    *)
+      log_tx "FAILED" "cpu_engine" "Invalid CPU engine '$_sce_eng'"
+      echo "[ERROR] Invalid CPU engine: $_sce_eng"
+      return 1
+      ;;
+  esac
+  log_tx "APPLIED" "cpu_engine" "CPU Engine set to $_sce_eng"
+  echo "[OK] CPU Engine set to: $_sce_eng"
+}
+
+set_thermal_engine() {
+  _ste_eng=$(sanitize_token "$1")
+  validate_and_load_config
+  case "$_ste_eng" in
+    ocore_intel|ocore_mtk|thermod)
+      save_ocore_key "THERMAL_ENGINE" "ocore_intel"
+      save_ocore_key "SMART_GUARD" "1"
+      setprop persist.sys.ocore__conf.thermalcore 0 2>/dev/null
+      setprop persist.sys.ocore__conf.DThermal 0 2>/dev/null
+      pkill -TERM -f sys.ocore-thermalcore 2>/dev/null
+      "$MODDIR/system/bin/thermod" profile "$GLOBAL_PROFILE" >/dev/null 2>&1
+      ;;
+    ocore_ai_therm|ocore_thermcore_mode)
+      save_ocore_key "THERMAL_ENGINE" "ocore_ai_therm"
+      setprop persist.sys.ocore__conf.thermalcore 1 2>/dev/null
+      setprop persist.sys.ocore__conf.DThermal 0 2>/dev/null
+      manage_daemon "ocore_thermcore" "start" >/dev/null 2>&1
+      ;;
+    ocore_lite|ocore_dyn_lite)
+      save_ocore_key "THERMAL_ENGINE" "ocore_lite"
+      setprop persist.sys.ocore__conf.thermalcore 0 2>/dev/null
+      pkill -TERM -f sys.ocore-thermalcore 2>/dev/null
+      [ ! -f "/data/local/tmp/backup.meta" ] && sh "$MODDIR/cortex/thermal/ocore-backup.sh" >/dev/null 2>&1
+      sh "$MODDIR/cortex/thermal/ocore-thermal-lite2.sh" >/dev/null 2>&1
+      ;;
+    ocore_extreme|ocore_dyn_extreme)
+      save_ocore_key "THERMAL_ENGINE" "ocore_extreme"
+      setprop persist.sys.ocore__conf.thermalcore 0 2>/dev/null
+      pkill -TERM -f sys.ocore-thermalcore 2>/dev/null
+      [ ! -f "/data/local/tmp/backup.meta" ] && sh "$MODDIR/cortex/thermal/ocore-backup.sh" >/dev/null 2>&1
+      sh "$MODDIR/cortex/thermal/ocore-thermal2.sh" >/dev/null 2>&1
+      ;;
+    monitor_only)
+      save_ocore_key "THERMAL_ENGINE" "monitor_only"
+      save_ocore_key "SMART_GUARD" "0"
+      pkill -TERM -f sys.ocore-thermalcore 2>/dev/null
+      "$MODDIR/system/bin/thermod" mode monitor_only >/dev/null 2>&1
+      ;;
+    oem_stock|restore_stock|stock)
+      save_ocore_key "THERMAL_ENGINE" "oem_stock"
+      setprop persist.sys.ocore__conf.thermalcore 0 2>/dev/null
+      setprop persist.sys.ocore__conf.DThermal 0 2>/dev/null
+      pkill -TERM -f sys.ocore-thermalcore 2>/dev/null
+      sh "$MODDIR/cortex/thermal/enable.sh" >/dev/null 2>&1
+      "$MODDIR/system/bin/thermod" restore_stock >/dev/null 2>&1
+      ;;
+    *)
+      log_tx "FAILED" "thermal_engine" "Invalid Thermal Engine '$_ste_eng'"
+      echo "[ERROR] Invalid Thermal Engine: $_ste_eng"
+      return 1
+      ;;
+  esac
+  log_tx "APPLIED" "thermal_engine" "Thermal Engine set to $_ste_eng"
+  echo "[OK] Thermal Engine set to: $_ste_eng"
+}
+
+# Multi-method daemon PID discovery (PID file + toybox pidof + toybox pgrep -f)
+find_daemon_pids() {
+  _fdp_patterns="$1"
+  _fdp_pidfile="$2"
+  _fdp_found=""
+
+  if [ -n "$_fdp_pidfile" ] && [ -f "$_fdp_pidfile" ]; then
+    _pf_pid=$(cat "$_fdp_pidfile" 2>/dev/null | tr -dc '0-9')
+    if [ -n "$_pf_pid" ] && verify_pid_identity "$_pf_pid" "$_fdp_patterns"; then
+      _fdp_found="$_pf_pid"
+    fi
+  fi
+
+  if [ -z "$_fdp_found" ]; then
+    _fdp_found=$(/system/bin/toybox pidof $_fdp_patterns 2>/dev/null)
+  fi
+
+  if [ -z "$_fdp_found" ]; then
+    for _pat in $_fdp_patterns; do
+      _pg_out=$(/system/bin/toybox pgrep -f "$_pat" 2>/dev/null | grep -vx "$$")
+      if [ -n "$_pg_out" ]; then
+        _fdp_found="$_fdp_found $_pg_out"
+      fi
+    done
+  fi
+
+  echo "$_fdp_found" | awk '{for(i=1;i<=NF;i++) if(!seen[$i]++) printf "%s ", $i}' | sed 's/ $//'
+}
+
+get_daemon_proc_stats() {
+  _gdp_pat="$1"
+  _gdp_pf="$2"
+  _gdp_pids=$(find_daemon_pids "$_gdp_pat" "$_gdp_pf")
+  if [ -z "$_gdp_pids" ]; then
+    echo "stopped|0|0.0|0"
+    return 1
+  fi
+  _first_pid=$(echo "$_gdp_pids" | awk '{print $1}')
+  _rss_kb=$(awk '/VmRSS:/ {print $2}' "/proc/$_first_pid/status" 2>/dev/null)
+  [ -z "$_rss_kb" ] && _rss_kb=0
+  _cpu_pct=$(ps -p "$_first_pid" -o %cpu= 2>/dev/null | tr -d ' ')
+  [ -z "$_cpu_pct" ] && _cpu_pct="0.0"
+  echo "running|$_first_pid|$_cpu_pct|$_rss_kb"
+  return 0
+}
+
+graceful_stop_proc() {
+  _gsp_names="$1"
+  _gsp_pf="$2"
+  _gsp_pids=$(find_daemon_pids "$_gsp_names" "$_gsp_pf")
+  if [ -n "$_gsp_pids" ]; then
+    kill -TERM $_gsp_pids 2>/dev/null
+    sleep 0.3
+    _still=$(find_daemon_pids "$_gsp_names" "$_gsp_pf")
+    [ -n "$_still" ] && kill -9 $_still 2>/dev/null
+  fi
+  [ -n "$_gsp_pf" ] && rm -f "$_gsp_pf" 2>/dev/null
+}
+
+manage_daemon() {
+  _md_name=$(sanitize_token "$1")
+  _md_act=$(sanitize_token "$2")
+  validate_and_load_config
+  rotate_log_if_needed "$DAEMON_LOG"
+
+  case "$_md_name" in
+    ocore_battmon|ocore_saver)
+      if [ "$_md_act" = "status" ]; then get_daemon_proc_stats "ocore.battmon-service" "$STATE_DIR/pid_ocore_battmon"; return 0; fi
+      graceful_stop_proc "ocore.battmon-service" "$STATE_DIR/pid_ocore_battmon"
+      rm -f "$STATE_DIR/cooldown_ocore_battmon" 2>/dev/null
+      if [ "$_md_act" = "start" ] || [ "$_md_act" = "restart" ]; then
+        save_ocore_key "OCORE_BATTMON_ENABLE" "1"
+        if [ "${OCORE_DYN_BAT_ENABLE:-0}" = "1" ]; then
+          graceful_stop_proc "ocore-bat" "$STATE_DIR/pid_ocore_dynbat"
+          save_ocore_key "OCORE_DYN_BAT_ENABLE" "0"
+          echo "off" > "$MODDIR/cortex/battery/mode.txt"
+        fi
+        unlock_cpu_nodes
+        setprop persist.sys.ocore.screenoff_div "${OCORE_BATTMON_DIV:-default}" 2>/dev/null
+        chmod 0755 "$MODDIR/system/bin/ocore.battmon-service" 2>/dev/null
+        nohup "$MODDIR/system/bin/ocore.battmon-service" >>"$DAEMON_LOG" 2>&1 &
+        sleep 1
+        _pid=$(find_daemon_pids "ocore.battmon-service" "$STATE_DIR/pid_ocore_battmon" | awk '{print $1}')
+        if [ -n "$_pid" ]; then
+          echo "$_pid" > "$STATE_DIR/pid_ocore_battmon"
+          echo "0" > "$STATE_DIR/crash_ocore_battmon"
+        fi
+      else
+        save_ocore_key "OCORE_BATTMON_ENABLE" "0"
+        echo "0" > "$STATE_DIR/crash_ocore_battmon"
+      fi
+      ;;
+    ocore_ktuner|ocore_tuner)
+      if [ "$_md_act" = "status" ]; then get_daemon_proc_stats "ocore.ktuner-service" "$STATE_DIR/pid_ocore_ktuner"; return 0; fi
+      graceful_stop_proc "ocore.ktuner-service" "$STATE_DIR/pid_ocore_ktuner"
+      rm -f "$STATE_DIR/cooldown_ocore_ktuner" 2>/dev/null
+      if [ "$_md_act" = "start" ] || [ "$_md_act" = "restart" ]; then
+        save_ocore_key "OCORE_KTUNER_ENABLE" "1"
+        chmod 0755 "$MODDIR/system/bin/ocore.ktuner-service" 2>/dev/null
+        nohup "$MODDIR/system/bin/ocore.ktuner-service" >>"$DAEMON_LOG" 2>&1 &
+        sleep 1
+        _pid=$(find_daemon_pids "ocore.ktuner-service" "$STATE_DIR/pid_ocore_ktuner" | awk '{print $1}')
+        if [ -n "$_pid" ]; then
+          echo "$_pid" > "$STATE_DIR/pid_ocore_ktuner"
+          echo "0" > "$STATE_DIR/crash_ocore_ktuner"
+        fi
+      else
+        save_ocore_key "OCORE_KTUNER_ENABLE" "0"
+        echo "0" > "$STATE_DIR/crash_ocore_ktuner"
+      fi
+      ;;
+    ocore_ai|ocore_detector)
+      if [ "$_md_act" = "status" ]; then get_daemon_proc_stats "ocore-game-daemon" "$STATE_DIR/pid_ocore_ai"; return 0; fi
+      graceful_stop_proc "ocore-game-daemon sys.ocore-service sys.ocore-appmonitoring ocore-game" "$STATE_DIR/pid_ocore_ai"
+      rm -f "$AZ_CONF_DIR/java.lock" "$AZ_CONF_DIR/API/.lock" "$STATE_DIR/cooldown_ocore_ai" 2>/dev/null
+      if [ "$_md_act" = "start" ] || [ "$_md_act" = "restart" ]; then
+        save_ocore_key "OCORE_AI_ENABLE" "1"
+        chmod 0755 "$MODDIR/system/bin/ocore-game-daemon" 2>/dev/null
+        nohup /system/bin/sh "$MODDIR/system/bin/ocore-game-daemon" >>"$DAEMON_LOG" 2>&1 &
+        sleep 1
+        _pid=$(find_daemon_pids "ocore-game-daemon" "$STATE_DIR/pid_ocore_ai" | awk '{print $1}')
+        if [ -n "$_pid" ]; then
+          echo "$_pid" > "$STATE_DIR/pid_ocore_ai"
+          echo "0" > "$STATE_DIR/crash_ocore_ai"
+        fi
+      else
+        save_ocore_key "OCORE_AI_ENABLE" "0"
+        echo "0" > "$STATE_DIR/crash_ocore_ai"
+      fi
+      ;;
+    ocore_dynbat|ocore_bat)
+      if [ "$_md_act" = "status" ]; then get_daemon_proc_stats "ocore-bat" "$STATE_DIR/pid_ocore_dynbat"; return 0; fi
+      graceful_stop_proc "ocore-bat" "$STATE_DIR/pid_ocore_dynbat"
+      rm -f "$STATE_DIR/cooldown_ocore_dynbat" 2>/dev/null
+      if [ "$_md_act" = "start" ] || [ "$_md_act" = "restart" ]; then
+        if [ "${OCORE_BATTMON_ENABLE:-1}" = "1" ]; then
+          graceful_stop_proc "ocore.battmon-service" "$STATE_DIR/pid_ocore_battmon"
+          save_ocore_key "OCORE_BATTMON_ENABLE" "0"
+        fi
+        save_ocore_key "OCORE_DYN_BAT_ENABLE" "1"
+        echo "on" > "$MODDIR/cortex/battery/mode.txt"
+        chmod 0755 "$MODDIR/engine/ocore-bat" 2>/dev/null
+        nohup "$MODDIR/engine/ocore-bat" >>"$DAEMON_LOG" 2>&1 &
+        sleep 1
+        _pid=$(find_daemon_pids "ocore-bat" "$STATE_DIR/pid_ocore_dynbat" | awk '{print $1}')
+        [ -n "$_pid" ] && echo "$_pid" > "$STATE_DIR/pid_ocore_dynbat"
+      else
+        save_ocore_key "OCORE_DYN_BAT_ENABLE" "0"
+        echo "off" > "$MODDIR/cortex/battery/mode.txt"
+        unlock_cpu_nodes
+      fi
+      ;;
+    ocore_thermcore)
+      if [ "$_md_act" = "status" ]; then get_daemon_proc_stats "sys.ocore-thermalcore" "$STATE_DIR/pid_ocore_thermcore"; return 0; fi
+      graceful_stop_proc "sys.ocore-thermalcore" "$STATE_DIR/pid_ocore_thermcore"
+      if [ "$_md_act" = "start" ] || [ "$_md_act" = "restart" ]; then
+        chmod 0755 "$MODDIR/system/bin/sys.ocore-thermalcore" 2>/dev/null
+        [ -x "$MODDIR/system/bin/sys.ocore-thermalcore" ] && nohup "$MODDIR/system/bin/sys.ocore-thermalcore" >>"$DAEMON_LOG" 2>&1 &
+        sleep 1
+        _pid=$(find_daemon_pids "sys.ocore-thermalcore" "$STATE_DIR/pid_ocore_thermcore" | awk '{print $1}')
+        [ -n "$_pid" ] && echo "$_pid" > "$STATE_DIR/pid_ocore_thermcore"
+      fi
+      ;;
+    ocore_fpsmon|ocore_daemon)
+      if [ "$_md_act" = "status" ]; then get_daemon_proc_stats "ocore-fps-daemon" "$STATE_DIR/pid_ocore_fpsmon"; return 0; fi
+      graceful_stop_proc "ocore-fps-daemon ocore-daemon" "$STATE_DIR/pid_ocore_fpsmon"
+      rm -f "$STATE_DIR/cooldown_ocore_fpsmon" 2>/dev/null
+      if [ "$_md_act" = "start" ] || [ "$_md_act" = "restart" ]; then
+        save_ocore_key "OCORE_FPSMON_ENABLE" "1"
+        chmod 0755 "$MODDIR/system/bin/ocore-fps-daemon" 2>/dev/null
+        nohup /system/bin/sh "$MODDIR/system/bin/ocore-fps-daemon" >>"$DAEMON_LOG" 2>&1 &
+        sleep 1
+        _pid=$(find_daemon_pids "ocore-fps-daemon" "$STATE_DIR/pid_ocore_fpsmon" | awk '{print $1}')
+        if [ -n "$_pid" ]; then
+          echo "$_pid" > "$STATE_DIR/pid_ocore_fpsmon"
+          echo "0" > "$STATE_DIR/crash_ocore_fpsmon"
+        fi
+      else
+        save_ocore_key "OCORE_FPSMON_ENABLE" "0"
+        echo "0" > "$STATE_DIR/crash_ocore_fpsmon"
+      fi
+      ;;
+    *)
+      log_tx "FAILED" "daemon" "Unknown daemon '$_md_name'"
+      echo "[ERROR] Unknown daemon: $_md_name"
+      return 1
+      ;;
+  esac
+  log_tx "APPLIED" "daemon" "$_md_name -> $_md_act"
+  echo "[OK] Daemon $_md_name -> $_md_act"
+}
+
+bind_zygisk_spoof() {
+  pkg=$(sanitize_token "$1")
+  preset=$(sanitize_token "$2")
+  with_cpu=$(sanitize_int "${3:-0}" "0")
+
+  if ! validate_package_name "$pkg" || [ -z "$preset" ]; then
+    log_tx "FAILED" "spoof_bind" "Invalid package '$pkg' or preset '$preset'"
+    echo "[ERROR] Valid non-system package name and preset are required"
+    return 1
+  fi
+
+  add_game_to_gamelist "$pkg" >/dev/null 2>&1
+
+  _out=$(MODDIR_OVERRIDE="$MODDIR" OCORE_DIR_OVERRIDE="$OCORE_DIR" sh "$MODDIR/cortex/ocore_json_tool.sh" bind "$pkg" "$preset" "$with_cpu" 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then
+    log_tx "APPLIED" "spoof_bind" "Bound $pkg -> $preset (CPU_Sim=$with_cpu)"
+    echo "$_out" | grep -v "^TRANSACTION_STATUS="
+    return 0
+  else
+    log_tx "FAILED" "spoof_bind" "Failed binding $pkg -> $preset"
+    echo "$_out" | grep -v "^TRANSACTION_STATUS="
+    return 1
+  fi
+}
+
+unbind_zygisk_spoof() {
+  pkg=$(sanitize_token "$1")
+  _out=$(MODDIR_OVERRIDE="$MODDIR" OCORE_DIR_OVERRIDE="$OCORE_DIR" sh "$MODDIR/cortex/ocore_json_tool.sh" unbind "$pkg" 2>&1)
+  _rc=$?
+  if [ "$_rc" -eq 0 ]; then
+    log_tx "APPLIED" "spoof_unbind" "Removed device profile binding for $pkg"
+    echo "$_out" | grep -v "^TRANSACTION_STATUS="
+    return 0
+  else
+    log_tx "FAILED" "spoof_unbind" "Failed to unbind $pkg"
+    echo "$_out" | grep -v "^TRANSACTION_STATUS="
+    return 1
+  fi
+}
+
+reset_zygisk_spoof() {
+  _out=$(MODDIR_OVERRIDE="$MODDIR" OCORE_DIR_OVERRIDE="$OCORE_DIR" sh "$MODDIR/cortex/ocore_json_tool.sh" reset 2>&1)
+  log_tx "APPLIED" "spoof_reset" "Cleared all device profile bindings"
+  echo "$_out" | grep -v "^TRANSACTION_STATUS="
+  return 0
+}
+
+remove_game_pkg() {
+  pkg=$(sanitize_token "$1")
+  [ -z "$pkg" ] && return 1
+  if [ -f "$MODDIR/cortex/thunderclash/gamelist.txt" ]; then
+    grep -vx "$pkg" "$MODDIR/cortex/thunderclash/gamelist.txt" > "$MODDIR/cortex/thunderclash/gamelist.txt.tmp.$$" 2>/dev/null
+    mv -f "$MODDIR/cortex/thunderclash/gamelist.txt.tmp.$$" "$MODDIR/cortex/thunderclash/gamelist.txt" 2>/dev/null
+  fi
+  sync_gamelist_artifacts
+  rm -f "$STATE_DIR/per_game/${pkg}.conf" 2>/dev/null
+  for rf in skia.txt vulkan.txt hybrid.txt; do
+    if [ -f "$RR_TMP_DIR/render/$rf" ]; then
+      grep -vx "$pkg" "$RR_TMP_DIR/render/$rf" > "$RR_TMP_DIR/render/${rf}.tmp" 2>/dev/null
+      mv -f "$RR_TMP_DIR/render/${rf}.tmp" "$RR_TMP_DIR/render/$rf" 2>/dev/null
+    fi
+  done
+  _cur_act=$(cat "$STATE_DIR/active_game_pkg" 2>/dev/null | tr -d '[:space:]')
+  if [ "$_cur_act" = "$pkg" ]; then
+    exit_game_session >/dev/null 2>&1
+  fi
+  MODDIR_OVERRIDE="$MODDIR" OCORE_DIR_OVERRIDE="$OCORE_DIR" sh "$MODDIR/cortex/ocore_json_tool.sh" unbind "$pkg" >/dev/null 2>&1
+  log_tx "APPLIED" "game_remove" "Removed $pkg from GameList and synced artifacts"
+  echo "[OK] Removed $pkg from GameList and cleaned active bindings"
+}
+
+set_per_game_config() {
+  pkg=$(sanitize_token "$1")
+  prof=$(sanitize_token "${2:-gaming}")
+  tch=$(sanitize_int "${3:-3}" "3")
+  ref=$(sanitize_int "${4:--1}" "-1")
+  ren=$(sanitize_token "${5:-default}")
+  if ! validate_package_name "$pkg"; then
+    log_tx "FAILED" "game_cfg" "Invalid or system package '$pkg'"
+    echo "[ERROR] Invalid or protected system package: $pkg"
+    return 1
+  fi
+
+  mkdir -p "$STATE_DIR/per_game" 2>/dev/null
+  cat << EOG > "$STATE_DIR/per_game/${pkg}.conf"
+GAME_PKG=$pkg
+GAME_PROFILE=$prof
+GAME_TOUCH=$tch
+GAME_REFRESH=$ref
+GAME_RENDERER=$ren
+EOG
+  add_game_to_gamelist "$pkg" >/dev/null 2>&1
+  for rf in skia.txt vulkan.txt hybrid.txt; do
+    if [ -f "$RR_TMP_DIR/render/$rf" ]; then
+      grep -vx "$pkg" "$RR_TMP_DIR/render/$rf" > "$RR_TMP_DIR/render/${rf}.tmp" 2>/dev/null
+      mv -f "$RR_TMP_DIR/render/${rf}.tmp" "$RR_TMP_DIR/render/$rf" 2>/dev/null
+    fi
+  done
+  case "$ren" in
+    skiagl|skia) echo "$pkg" >> "$RR_TMP_DIR/render/skia.txt" ;;
+    skiavk|vulkan) echo "$pkg" >> "$RR_TMP_DIR/render/vulkan.txt" ;;
+    hybrid) echo "$pkg" >> "$RR_TMP_DIR/render/hybrid.txt" ;;
+  esac
+
+  log_tx "APPLIED" "game_cfg" "Saved per-game config for $pkg ($prof, touch=$tch, ren=$ren)"
+  echo "[OK] Saved per-game profile for $pkg"
+}
+
+backup_user_profile() {
+  bname=$(sanitize_token "${1:-user_snapshot}")
+  validate_and_load_config
+  bfile="$BACKUP_DIR/ocore_profile_${bname}.conf"
+  cp -f "$OCORE_CONF" "$bfile" 2>/dev/null
+  log_tx "APPLIED" "config_backup" "Saved snapshot $bfile"
+  echo "[OK] Configuration backed up: $bname"
+}
+
+restore_user_profile() {
+  bname=$(sanitize_token "${1:-user_snapshot}")
+  bfile="$BACKUP_DIR/ocore_profile_${bname}.conf"
+  if [ "$bname" = "default" ]; then
+    tmp_f="${OCORE_CONF}.rst.$$"
+    write_default_config_file "$tmp_f"
+    mv -f "$tmp_f" "$OCORE_CONF" 2>/dev/null
+    validate_and_load_config
+    evaluate_and_apply_arbiter >/dev/null 2>&1
+    log_tx "APPLIED" "config_restore" "Restored factory default config.conf"
+    echo "[OK] Restored factory default configuration"
+    return 0
+  fi
+  if [ -f "$bfile" ] && sh -n "$bfile" 2>/dev/null; then
+    cp -f "$bfile" "$OCORE_CONF" 2>/dev/null
+    validate_and_load_config
+    evaluate_and_apply_arbiter >/dev/null 2>&1
+    log_tx "APPLIED" "config_restore" "Restored snapshot $bname"
+    echo "[OK] Restored configuration backup: $bname"
+  else
+    log_tx "FAILED" "config_restore" "Backup '$bname' not found or invalid"
+    echo "[ERROR] Backup profile '$bname' not found or invalid"
+    return 1
+  fi
+}
+
+apply_zram_vm() {
+  _azv_swp=$(sanitize_int "${1:-100}" "100")
+  save_ocore_key "ZRAM_SWAPPINESS" "$_azv_swp"
+  safe_write_node "VM_TUNER" "/proc/sys/vm/swappiness" "$_azv_swp" "0644" "1"
+  safe_write_node "VM_TUNER" "/proc/sys/vm/page-cluster" "0"
+  safe_write_node "VM_TUNER" "/proc/sys/vm/vfs_cache_pressure" "100"
+  safe_write_node "VM_TUNER" "/proc/sys/vm/dirty_ratio" "20"
+  safe_write_node "VM_TUNER" "/proc/sys/vm/dirty_background_ratio" "10"
+  log_tx "APPLIED" "zram_vm" "ZRAM swappiness=$_azv_swp"
+  echo "[OK] ZRAM Swappiness set to $_azv_swp & VM parameters optimized"
+}
+
+apply_net_tweaks() {
+  _ant_mode=$(sanitize_int "${1:-1}" "1")
+  save_ocore_key "TCP_LOW_LATENCY" "$_ant_mode"
+  if [ "$_ant_mode" = "1" ]; then
+    if grep -q "bbr" /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+      safe_write_node "NET_TUNER" "/proc/sys/net/ipv4/tcp_congestion_control" "bbr"
+    fi
+    safe_write_node "NET_TUNER" "/proc/sys/net/ipv4/tcp_low_latency" "1"
+    safe_write_node "NET_TUNER" "/proc/sys/net/ipv4/tcp_fastopen" "3"
+    safe_write_node "NET_TUNER" "/proc/sys/net/ipv4/tcp_sack" "1"
+    safe_write_node "NET_TUNER" "/proc/sys/net/ipv4/tcp_timestamps" "0"
+    log_tx "APPLIED" "net_lowlat" "Enabled Low-Latency TCP stack"
+    echo "[OK] TCP Low-Latency & FastOpen enabled"
+  else
+    safe_write_node "NET_TUNER" "/proc/sys/net/ipv4/tcp_congestion_control" "cubic"
+    safe_write_node "NET_TUNER" "/proc/sys/net/ipv4/tcp_low_latency" "0"
+    log_tx "APPLIED" "net_lowlat" "Restored default TCP stack (cubic)"
+    echo "[OK] TCP settings restored to default (cubic)"
+  fi
+}
+
+set_private_dns() {
+  _spd_mode=$(sanitize_token "$1")
+  save_ocore_key "PRIVATE_DNS_MODE" "$_spd_mode"
+  case "$_spd_mode" in
+    adguard)
+      settings put global private_dns_mode hostname >/dev/null 2>&1
+      settings put global private_dns_specifier "dns.adguard-dns.com" >/dev/null 2>&1
+      ;;
+    cloudflare)
+      settings put global private_dns_mode hostname >/dev/null 2>&1
+      settings put global private_dns_specifier "one.one.one.one" >/dev/null 2>&1
+      ;;
+    quad9)
+      settings put global private_dns_mode hostname >/dev/null 2>&1
+      settings put global private_dns_specifier "dns.quad9.net" >/dev/null 2>&1
+      ;;
+    automatic|opportunistic)
+      settings put global private_dns_mode opportunistic >/dev/null 2>&1
+      ;;
+    off|*)
+      settings put global private_dns_mode off >/dev/null 2>&1
+      ;;
+  esac
+  log_tx "APPLIED" "private_dns" "Private DNS=$_spd_mode"
+  echo "[OK] Private DNS set to: $_spd_mode"
+}
+
+set_mtk_apu_dram() {
+  _smd_state=$(sanitize_int "${1:-0}" "0")
+  save_ocore_key "MTK_APU_DRAM_BOOST" "$_smd_state"
+  if [ "$_smd_state" = "1" ]; then
+    safe_write_node "MTK_BOOST" "/sys/devices/platform/boot_dramboost/dramboost/dramboost" "1" "0644" "0" "1"
+    safe_write_node "MTK_BOOST" "/proc/cpufreq/cpufreq_cci_mode" "1" "0644" "0" "1"
+    safe_write_node "MTK_BOOST" "/proc/perfmgr/syslimiter/syslimiter_force_disable" "1" "0644" "0" "1"
+    log_tx "APPLIED" "mtk_boost" "Enabled MediaTek DRAM/CCI Boost"
+    echo "[OK] MediaTek DRAM & CCI Boost Enabled"
+  else
+    safe_write_node "MTK_BOOST" "/sys/devices/platform/boot_dramboost/dramboost/dramboost" "0" "0644" "0" "1"
+    safe_write_node "MTK_BOOST" "/proc/cpufreq/cpufreq_cci_mode" "0" "0644" "0" "1"
+    safe_write_node "MTK_BOOST" "/proc/perfmgr/syslimiter/syslimiter_force_disable" "0" "0644" "0" "1"
+    log_tx "APPLIED" "mtk_boost" "Disabled MediaTek DRAM/CCI Boost"
+    echo "[OK] MediaTek DRAM & CCI Boost Disabled"
+  fi
+}
+
+set_charging_switch() {
+  _scs_act="$1"
+  _scs_node=$(detect_charging_node)
+  if [ "$_scs_node" = "UNSUPPORTED" ]; then
+    log_tx "UNSUPPORTED" "charger_switch" "No writable charging control node on this device"
+    return 1
+  fi
+  _scs_rc=1
+  case "$_scs_node" in
+    *current_cmd)
+      [ "$_scs_act" = "disable_charging" ] && safe_write_node "CHARGER" "$_scs_node" "0 1" && _scs_rc=0
+      [ "$_scs_act" != "disable_charging" ] && safe_write_node "CHARGER" "$_scs_node" "0 0" && _scs_rc=0
+      ;;
+    *input_suspend|*disable_charger)
+      [ "$_scs_act" = "disable_charging" ] && safe_write_node "CHARGER" "$_scs_node" "1" && _scs_rc=0
+      [ "$_scs_act" != "disable_charging" ] && safe_write_node "CHARGER" "$_scs_node" "0" && _scs_rc=0
+      ;;
+    *charging_enabled|*BatteryChargingEnabled|*charger_limit_enable)
+      [ "$_scs_act" = "disable_charging" ] && safe_write_node "CHARGER" "$_scs_node" "0" && _scs_rc=0
+      [ "$_scs_act" != "disable_charging" ] && safe_write_node "CHARGER" "$_scs_node" "1" && _scs_rc=0
+      ;;
+  esac
+  return $_scs_rc
+}
+
+# ==============================================================================
+# DEEP SELF-DIAGNOSTICS & SYSTEM AUDIT (v3.2.0-NextGen)
+# ==============================================================================
+run_self_diagnostics() {
+  validate_and_load_config
+  scan_hardware_capabilities
+  [ -f "$STATE_DIR/hw_capabilities.env" ] && . "$STATE_DIR/hw_capabilities.env"
+  _diag_ts="$(date '+%Y-%m-%d %H:%M:%S')"
+  {
+    echo "================================================================"
+    echo " OCORE v3.2.0-NextGen — UNIFIED DIAGNOSTIC & HARDWARE COMPATIBILITY REPORT"
+    echo " Generated at : $_diag_ts"
+    echo "================================================================"
+    echo "[1] DEVICE, SOC, ROM & ROOT ENVIRONMENT"
+    echo "  • Model / Device   : ${HW_MODEL:-Unknown} (${HW_DEVICE:-Unknown})"
+    echo "  • SoC Family       : ${HW_SOC_FAM:-Unknown} (ID: ${HW_SOC_ID:-0})"
+    echo "  • Android / API    : Android ${HW_ANDROID:-Unknown} (API ${HW_API:-Unknown})"
+    echo "  • Kernel Version   : $(uname -r -v 2>/dev/null)"
+    echo "  • Root Bridge Env  : ${HW_ROOT_MGR:-Unknown}"
+    echo "  • SELinux Status   : $(getenforce 2>/dev/null || echo 'Unknown')"
+    echo "  • CPU Topology     : ${HW_TOTAL_CORES:-8} Cores | ${HW_CPU_CLUSTERS:-Dynamic}"
+    echo "  • GPU Architecture : ${HW_GPU_ARCH:-Generic} (${HW_GPU_NODE:-N/A})"
+    echo ""
+    echo "[2] PERFORMANCE ARBITER & TRANSACTION STATE"
+    echo "  • Global Profile   : $GLOBAL_PROFILE"
+    echo "  • Effective Profile: $(cat "$STATE_DIR/effective_profile" 2>/dev/null || echo "$GLOBAL_PROFILE")"
+    echo "  • Winning Priority : $(cat "$STATE_DIR/arbiter_winning_tier" 2>/dev/null || echo "5:GLOBAL_PROFILE")"
+    echo "  • Last Transaction : $(cat "$STATE_DIR/last_transaction.txt" 2>/dev/null || echo "APPLIED|init|Ready")"
+    echo ""
+    echo "[3] HARDWARE CAPABILITY & SUBSYSTEM SUPPORT MATRIX"
+    echo "  • MediaTek EEM Undervolt : $([ "$HW_EEM_SUPPORTED" = "1" ] && echo "SUPPORTED (${HW_EEM_RAILS})" || echo "UNSUPPORTED")"
+    echo "  • EEM Baseline Captured  : $([ -f "$EEM_BASELINE_FILE" ] && echo "YES ($EEM_BASELINE_FILE)" || echo "N/A")"
+    echo "  • MediaTek Thermal /proc : $([ "$HW_MTK_THERM_SUPPORTED" = "1" ] && echo "SUPPORTED (Trip-Point Mod=${ALLOW_TRIP_POINT_MOD:-0})" || echo "UNSUPPORTED")"
+    echo "  • MediaTek GED GPU Boost : $([ "$HW_GED_SUPPORTED" = "1" ] && echo "SUPPORTED" || echo "UNSUPPORTED")"
+    echo "  • MediaTek FPSGO Ceiling : $([ "$HW_FPSGO_SUPPORTED" = "1" ] && echo "SUPPORTED" || echo "UNSUPPORTED")"
+    echo "  • Smart Charging Control : $([ "$HW_CHG_SUPPORTED" = "1" ] && echo "SUPPORTED ($HW_CHG_NODE)" || echo "UNSUPPORTED")"
+    echo ""
+    echo "[4] NON-DESTRUCTIVE MODULE CONFLICT DETECTOR"
+    CONFLICTS_FOUND=""
+    for old_m in RaiRin-AI AZenith ThermodMT6877 battmontester laya_kerneltuner mtkvoltoptimizer; do
+      if [ -d "/data/adb/modules/$old_m" ] && [ ! -f "/data/adb/modules/$old_m/remove" ] && [ ! -f "/data/adb/modules/$old_m/disable" ]; then
+        CONFLICTS_FOUND="$CONFLICTS_FOUND $old_m"
+        echo "  • [CONFLICT WARN] Active legacy module: /data/adb/modules/$old_m (Disable recommended)"
+      fi
+    done
+    [ -z "$CONFLICTS_FOUND" ] && echo "  • [CLEAN] Zero conflicting external performance modules active."
+    echo ""
+    echo "[5] DYNAMIC THERMAL ZONES"
+    "$MODDIR/system/bin/thermod" zones 2>/dev/null
+    echo ""
+    echo "[6] RECENT TRANSACTIONS (Last 10)"
+    tail -n 10 "$TX_LOG" 2>/dev/null | sed 's/^/  /' || echo "  • None yet."
+    echo ""
+    echo "[7] RECENT ERRORS & WARNINGS (Last 15)"
+    if [ -s "$ERROR_LOG" ]; then
+      tail -n 15 "$ERROR_LOG" | sed 's/^/  /'
+    else
+      echo "  • Zero errors recorded in $ERROR_LOG!"
+    fi
+    echo "================================================================"
+  } | tee "$LOG_DIR/self_diagnostic_report.log"
+  log_event "INFO" "DIAG" "Completed Full v3.2.0-NextGen System & Hardware Compatibility Audit"
+}
+
+export_diagnostic_bundle() {
+  [ ! -s "$VOLT_LOG" ] && apply_eem_voltage "$VOLT_PROFILE" >/dev/null 2>&1
+  [ ! -s "$AUDIT_LOG" ] && evaluate_and_apply_arbiter >/dev/null 2>&1
+  run_self_diagnostics >/dev/null 2>&1
+  ts_file="$(date '+%Y%m%d_%H%M%S')"
+  out_dir="/sdcard/Download"
+  [ ! -d "$out_dir" ] && out_dir="/storage/emulated/0/Download"
+  mkdir -p "$out_dir" 2>/dev/null
+  out_file="$out_dir/Ocore_v3.0.0_Diagnostic_${ts_file}.log"
+
+  {
+    cat "$LOG_DIR/self_diagnostic_report.log" 2>/dev/null
+    echo ""
+    echo "==================== [ACTIVE CONFIG.CONF] ===================="
+    cat "$OCORE_CONF" 2>/dev/null
+    echo ""
+    echo "==================== [CAPTURED EEM BASELINE] ================="
+    cat "$EEM_BASELINE_FILE" 2>/dev/null
+    echo ""
+    echo "==================== [TRANSACTION LOG] ======================="
+    tail -n 100 "$TX_LOG" 2>/dev/null
+    echo ""
+    echo "==================== [BOOT TRACE LOG] ========================"
+    tail -n 120 "$BOOT_LOG" 2>/dev/null
+    echo ""
+    echo "==================== [OCORE EVENTS LOG] ======================"
+    tail -n 120 "$OCORE_LOG" 2>/dev/null
+    echo ""
+    echo "==================== [EEM VOLTAGE & SCHEDUTIL LOG] ==========="
+    tail -n 80 "$VOLT_LOG" 2>/dev/null
+    echo ""
+    echo "==================== [KERNEL NODES AUDIT LOG] ================"
+    tail -n 120 "$AUDIT_LOG" 2>/dev/null
+    echo ""
+    echo "==================== [DAEMONS WATCHDOG LOG] =================="
+    tail -n 120 "$DAEMON_LOG" 2>/dev/null
+  } > "$out_file" 2>/dev/null
+
+  log_tx "APPLIED" "export_logs" "Saved diagnostic bundle to $out_file"
+  echo "[OK] Diagnostic report saved to: $out_file"
+}
+
+# ==============================================================================
+# TELEMETRY & FULL STATUS OUTPUT WITH DATA PROVENANCE
+# ==============================================================================
+# Fast Zero-Fork Daemon PID & RSS Reader for Polling (Never spawns pgrep/ps across /proc!)
+get_daemon_proc_stats_fast() {
+  _gdp_pf="$1"
+  if [ -n "$_gdp_pf" ] && [ -f "$_gdp_pf" ]; then
+    _pf_pid=""
+    read -r _pf_pid < "$_gdp_pf" 2>/dev/null || _pf_pid=""
+    case "$_pf_pid" in
+      ""|*[!0-9]*) ;;
+      *)
+        if [ -d "/proc/$_pf_pid" ]; then
+          _rss_kb=0
+          while IFS=": " read -r _sk _sv _; do
+            if [ "$_sk" = "VmRSS" ]; then
+              _rss_kb="$_sv"
+              break
+            fi
+          done < "/proc/$_pf_pid/status" 2>/dev/null
+          echo "running|$_pf_pid|0.1|${_rss_kb:-0}"
+          return 0
+        fi
+        ;;
+    esac
+  fi
+  echo "stopped|0|0.0|0"
+  return 1
+}
+
+read_first_line() {
+  _rfl_out=""
+  if [ -f "$1" ]; then
+    read -r _rfl_out < "$1" 2>/dev/null || _rfl_out=""
+  fi
+}
+
+print_full_status() {
+  validate_and_load_config
+  [ ! -f "$STATE_DIR/hw_capabilities.env" ] && scan_hardware_capabilities
+  [ -f "$STATE_DIR/hw_capabilities.env" ] && . "$STATE_DIR/hw_capabilities.env" 2>/dev/null
+
+  # Battery Telemetry & Provenance (Zero forks using built-in read)
+  BATT_PROV="UNAVAILABLE"
+  BATT_CAP="UNAVAILABLE"
+  if [ -f "/sys/class/power_supply/battery/capacity" ]; then
+    read_first_line "/sys/class/power_supply/battery/capacity"
+    case "$_rfl_out" in
+      ""|*[!0-9]*) ;;
+      *) BATT_CAP="$_rfl_out"; BATT_PROV="ACTUAL" ;;
+    esac
+  fi
+  read_first_line "/sys/class/power_supply/battery/status"; BATT_STATUS="${_rfl_out:-UNAVAILABLE}"
+  read_first_line "/sys/class/power_supply/battery/voltage_now"; BATT_VOLT_RAW="$_rfl_out"
+  read_first_line "/sys/class/power_supply/battery/current_now"; BATT_CURR_RAW="$_rfl_out"
+  read_first_line "/sys/class/power_supply/battery/health"; BATT_HEALTH_STR="${_rfl_out:-UNAVAILABLE}"
+  read_first_line "/sys/class/power_supply/battery/cycle_count"; BATT_CYCLES="${_rfl_out:-UNAVAILABLE}"
+  read_first_line "/sys/class/power_supply/battery/charge_full"; CHG_FULL="$_rfl_out"
+  read_first_line "/sys/class/power_supply/battery/charge_full_design"; CHG_DESIGN="$_rfl_out"
+
+  BATT_HEALTH_PCT="UNAVAILABLE"
+  case "$CHG_FULL:$CHG_DESIGN" in
+    ""|*:[!0-9]*|*[!0-9]*:*|*:0) ;;
+    *)
+      if [ -n "$CHG_FULL" ] && [ -n "$CHG_DESIGN" ] && [ "$CHG_DESIGN" -gt 0 ] 2>/dev/null; then
+        BATT_HEALTH_PCT="$(( (CHG_FULL * 100) / CHG_DESIGN ))%"
+      fi
+      ;;
+  esac
+
+  BATT_MV="UNAVAILABLE"
+  case "$BATT_VOLT_RAW" in
+    ""|0|*[!0-9]*) ;;
+    *)
+      if [ "$BATT_VOLT_RAW" -gt 100000 ] 2>/dev/null; then BATT_MV="$((BATT_VOLT_RAW / 1000)) mV"; else BATT_MV="${BATT_VOLT_RAW} mV"; fi
+      ;;
+  esac
+
+  BATT_MA="UNAVAILABLE"
+  case "$BATT_CURR_RAW" in
+    ""|"-") ;;
+    *)
+      abs_c="${BATT_CURR_RAW#-}"
+      case "$abs_c" in
+        ""|*[!0-9]*) ;;
+        *)
+          if [ "$abs_c" -gt 10000 ] 2>/dev/null; then BATT_MA="$((BATT_CURR_RAW / 1000)) mA"; else BATT_MA="${BATT_CURR_RAW} mA"; fi
+          ;;
+      esac
+      ;;
+  esac
+
+  # RAM, Cache, ZRAM & Cached Storage Telemetry (Zero forks on hot path)
+  read_memory_storage_telemetry
+  STORAGE_CACHE_FILE="$STATE_DIR/storage_cache.env"
+  if [ ! -f "$STORAGE_CACHE_FILE" ]; then
+    STORAGE_TOTAL_GB="N/A"; STORAGE_FREE_GB="N/A"
+    if command -v df >/dev/null 2>&1; then
+      _df_line=$(df -k /data 2>/dev/null | tail -n 1)
+      [ -z "$_df_line" ] && _df_line=$(df -k . 2>/dev/null | tail -n 1)
+      _st_tot_kb=$(echo "$_df_line" | awk '{print $(NF-4)}' | tr -dc '0-9')
+      _st_avl_kb=$(echo "$_df_line" | awk '{print $(NF-2)}' | tr -dc '0-9')
+      [ -n "$_st_tot_kb" ] && STORAGE_TOTAL_GB=$(( _st_tot_kb / 1048576 ))
+      [ -n "$_st_avl_kb" ] && STORAGE_FREE_GB=$(( _st_avl_kb / 1048576 ))
+    fi
+    printf 'STORAGE_TOTAL_GB="%s"\nSTORAGE_FREE_GB="%s"\n' "$STORAGE_TOTAL_GB" "$STORAGE_FREE_GB" > "$STORAGE_CACHE_FILE" 2>/dev/null
+  else
+    . "$STORAGE_CACHE_FILE" 2>/dev/null
+  fi
+
+  AVAIL_IOSCHED="default mq-deadline kyber bfq none"
+  read_first_line "/proc/loadavg"; LOAD_AVG="${_rfl_out%% *}"
+  read_first_line "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"; GOV0="${_rfl_out:-schedutil}"
+  read_first_line "/sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors"; AVAIL_GOVS="${_rfl_out:-schedutil performance powersave}"
+  read_first_line "/proc/sys/vm/swappiness"; SWP_CUR="${_rfl_out:-$ZRAM_SWAPPINESS}"
+  read_first_line "/proc/sys/net/ipv4/tcp_congestion_control"; TCP_CUR="${_rfl_out:-cubic}"
+
+  # GPU Frequency & Load Telemetry + Provenance
+  GPU_FREQ_MHZ="UNAVAILABLE"
+  GPU_LOAD_PCT="UNAVAILABLE"
+  GPU_PROV="UNAVAILABLE"
+  if [ -f "/sys/kernel/ged/hal/current_freqency" ]; then
+    read_first_line "/sys/kernel/ged/hal/current_freqency"
+    g_khz="${_rfl_out%% *}"
+    case "$g_khz" in ""|0|*[!0-9]*) ;; *) GPU_FREQ_MHZ="$((g_khz / 1000)) MHz"; GPU_PROV="ACTUAL" ;; esac
+  elif [ -f "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq" ]; then
+    read_first_line "/sys/class/kgsl/kgsl-3d0/devfreq/cur_freq"
+    case "$_rfl_out" in ""|0|*[!0-9]*) ;; *) GPU_FREQ_MHZ="$((_rfl_out / 1000000)) MHz"; GPU_PROV="ACTUAL" ;; esac
+  elif [ -f "/proc/gpufreqv2/gpufreq_status" ]; then
+    g_khz=$(grep -oE '(GPU-OPP-Freq|cur_freq)[[:space:]:=]+[0-9]+' /proc/gpufreqv2/gpufreq_status 2>/dev/null | head -n 1 | grep -oE '[0-9]+$')
+    [ -n "$g_khz" ] && GPU_FREQ_MHZ="$((g_khz / 1000)) MHz" && GPU_PROV="ACTUAL"
+  elif [ -f "/proc/gpufreq/gpufreq_var_dump" ]; then
+    g_khz=$(grep -oE '(g_cur_opp_freq|cur_gpu_freq|g_cur_gpu_freq)[[:space:]]*=[[:space:]]*[0-9]+' /proc/gpufreq/gpufreq_var_dump 2>/dev/null | head -n 1 | grep -oE '[0-9]+$')
+    [ -n "$g_khz" ] && GPU_FREQ_MHZ="$((g_khz / 1000)) MHz" && GPU_PROV="ACTUAL"
+  fi
+  g_load=$(read_live_gpu_load_pct)
+  if [ -n "$g_load" ] && { [ -f "/sys/module/ged/parameters/gpu_loading" ] || [ -f "/sys/kernel/ged/hal/gpu_utilization" ] || [ -f "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage" ]; }; then
+    GPU_LOAD_PCT="${g_load}%"
+    GPU_PROV="ACTUAL"
+  fi
+
+  read_first_line "$STATE_DIR/active_game_pkg"; ACTIVE_GAME="$_rfl_out"
+  [ -z "$ACTIVE_GAME" ] && read_first_line "$MODDIR/cortex/thunderclash/game-active.txt" && ACTIVE_GAME="$_rfl_out"
+  read_first_line "$STATE_DIR/thermal_state"; THERM_STATE="${_rfl_out:-NORMAL}"
+  read_first_line "$STATE_DIR/effective_profile"; EFF_PROFILE="${_rfl_out:-$GLOBAL_PROFILE}"
+  read_first_line "$STATE_DIR/arbiter_winning_tier"; WIN_TIER="${_rfl_out:-5:GLOBAL_PROFILE}"
+  read_first_line "$STATE_DIR/last_transaction.txt"; LAST_TX="${_rfl_out:-APPLIED|init|Ready}"
+  read_first_line "$STATE_DIR/detected_conflicts.txt"; CONFLICTS_STR="${_rfl_out:-None}"
+  EEM_BASELINE_STR="NotCaptured"
+  [ -f "$EEM_BASELINE_FILE" ] && read_first_line "$EEM_BASELINE_FILE" && EEM_BASELINE_STR="${_rfl_out:-Captured}"
+
+  ERR_COUNT=0
+  if [ -f "$ERROR_LOG" ] && [ -s "$ERROR_LOG" ]; then
+    while IFS= read -r _eline; do ERR_COUNT=$((ERR_COUNT + 1)); done < "$ERROR_LOG"
+  fi
+
+  ST_AI=$(get_daemon_proc_stats_fast "$STATE_DIR/pid_ocore_ai")
+  ST_BATTMON=$(get_daemon_proc_stats_fast "$STATE_DIR/pid_ocore_battmon")
+  ST_KTUNER=$(get_daemon_proc_stats_fast "$STATE_DIR/pid_ocore_ktuner")
+  ST_DYNBAT=$(get_daemon_proc_stats_fast "$STATE_DIR/pid_ocore_dynbat")
+  ST_THERMCORE=$(get_daemon_proc_stats_fast "$STATE_DIR/pid_ocore_thermcore")
+  ST_FPSMON=$(get_daemon_proc_stats_fast "$STATE_DIR/pid_ocore_fpsmon")
+
+  echo "=== OCORE_STATUS_BEGIN ==="
+  echo "OCORE_VERSION=v3.2.0-NextGen"
+  echo "GLOBAL_PROFILE=$GLOBAL_PROFILE"
+  echo "EFFECTIVE_PROFILE=$EFF_PROFILE"
+  echo "USER_MANUAL_OVERRIDE=${USER_MANUAL_OVERRIDE:-none}"
+  echo "ARBITER_WINNING_TIER=$WIN_TIER"
+  echo "LAST_TRANSACTION=$LAST_TX"
+  echo "SAFE_MODE=${SAFE_MODE:-0}"
+  echo "THERMAL_STATE=${THERM_STATE:-NORMAL}"
+  echo "ALLOW_TRIP_POINT_MOD=${ALLOW_TRIP_POINT_MOD:-0}"
+  echo "CPU_WARM_C=${CPU_WARM_C:-75}"; echo "CPU_HOT_C=${CPU_HOT_C:-82}"; echo "CPU_CRIT_C=${CPU_CRIT_C:-90}"
+  echo "GPU_WARM_C=${GPU_WARM_C:-72}"; echo "GPU_HOT_C=${GPU_HOT_C:-80}"; echo "GPU_CRIT_C=${GPU_CRIT_C:-88}"
+  echo "SOC_WARM_C=${SOC_WARM_C:-62}"; echo "SOC_HOT_C=${SOC_HOT_C:-70}"; echo "SOC_CRIT_C=${SOC_CRIT_C:-78}"
+  echo "BAT_WARM_C=${BAT_WARM_C:-45}"; echo "BAT_HOT_C=${BAT_HOT_C:-48}"; echo "BAT_CRIT_C=${BAT_CRIT_C:-51}"
+  echo "THERM_HYST_C=${THERM_HYST_C:-2}"
+  echo "THERM_COOLDOWN_SEC=${THERM_COOLDOWN_SEC:-30}"
+  echo "CPU_ENGINE=$CPU_ENGINE"
+  echo "THERMAL_ENGINE=$THERMAL_ENGINE"
+  echo "THUNDER_LOCK_FREQ=$THUNDER_LOCK_FREQ"
+  echo "SMART_GUARD=$SMART_GUARD"
+  echo "FPSGO_UNLOCK=$FPSGO_UNLOCK"
+  echo "GED_BOOST=$GED_BOOST"
+  echo "SYNC_MTC_PROFILES=$SYNC_MTC_PROFILES"
+  echo "OCORE_BATTMON_ENABLE=${OCORE_BATTMON_ENABLE:-1}"
+  echo "OCORE_BATTMON_DIV=${OCORE_BATTMON_DIV:-default}"
+  echo "OCORE_KTUNER_ENABLE=${OCORE_KTUNER_ENABLE:-1}"
+  echo "OCORE_AI_ENABLE=${OCORE_AI_ENABLE:-1}"
+  echo "OCORE_DYN_BAT_ENABLE=${OCORE_DYN_BAT_ENABLE:-0}"
+  echo "OCORE_FPSMON_ENABLE=${OCORE_FPSMON_ENABLE:-0}"
+  echo "VOLT_PROFILE=${VOLT_PROFILE:-CONSERVATIVE}"
+  echo "VOLT_OFFSET_B=${VOLT_OFFSET_B:--3}"
+  echo "VOLT_OFFSET_L=${VOLT_OFFSET_L:--3}"
+  echo "VOLT_OFFSET_CCI=${VOLT_OFFSET_CCI:--2}"
+  echo "VOLT_OFFSET_GPU=${VOLT_OFFSET_GPU:--2}"
+  echo "EEM_SUPPORTED=${HW_EEM_SUPPORTED:-0}"
+  echo "EEM_RAILS=${HW_EEM_RAILS:-None}"
+  echo "EEM_BASELINE=${EEM_BASELINE_STR:-NotCaptured}"
+  echo "SCHEDUTIL_TUNE_ENABLE=${SCHEDUTIL_TUNE_ENABLE:-1}"
+  echo "EEM_PERSIST_GUARD=${EEM_PERSIST_GUARD:-1}"
+  echo "CPUSET_EAS_OPT=${CPUSET_EAS_OPT:-1}"
+  echo "IO_QUEUE_OPT=${IO_QUEUE_OPT:-1}"
+  echo "IO_SCHEDULER=${IO_SCHEDULER:-default}"
+  echo "GAME_DETECT_MODE=${GAME_DETECT_MODE:-auto}"
+  echo "GAME_DND_ENABLE=${GAME_DND_ENABLE:-0}"
+  echo "GAME_PRELOAD_ENABLE=${GAME_PRELOAD_ENABLE:-0}"
+  echo "ACTIVE_GAME=${ACTIVE_GAME:-None}"
+  echo "TOUCH_LEVEL=$TOUCH_LEVEL"
+  echo "REFRESH_IDX=$REFRESH_IDX"
+  echo "RENDER_MODE=$RENDER_MODE"
+  echo "BYPASS_CHG_ENABLE=$BYPASS_CHG_ENABLE"
+  echo "BYPASS_CHG_THRESHOLD=$BYPASS_CHG_THRESHOLD"
+  echo "SMART_CHARGE_LIMIT=$SMART_CHARGE_LIMIT"
+  echo "SMART_CHARGE_STOP=$SMART_CHARGE_STOP"
+  echo "SMART_CHARGE_RESUME=$SMART_CHARGE_RESUME"
+  echo "CHG_SUPPORTED=${HW_CHG_SUPPORTED:-0}"
+  echo "CHG_NODE=${HW_CHG_NODE:-UNSUPPORTED}"
+  echo "ZRAM_SWAPPINESS=$SWP_CUR"
+  echo "TCP_CONG=$TCP_CUR"
+  echo "TCP_LOW_LATENCY=$TCP_LOW_LATENCY"
+  echo "PRIVATE_DNS_MODE=$PRIVATE_DNS_MODE"
+  echo "DEEP_DOZE_ENABLE=$DEEP_DOZE_ENABLE"
+  echo "MTK_APU_DRAM_BOOST=$MTK_APU_DRAM_BOOST"
+  echo "AUTO_APPLY_RECOMMENDATION=${AUTO_APPLY_RECOMMENDATION:-0}"
+  echo "DEBUG_VERBOSE=${DEBUG_VERBOSE:-1}"
+  echo "ERR_COUNT=$ERR_COUNT"
+  echo "DETECTED_CONFLICTS=${CONFLICTS_STR:-None}"
+  echo "HW_MODEL=${HW_MODEL:-Unknown}"
+  echo "HW_DEVICE=${HW_DEVICE:-Unknown}"
+  echo "HW_SOC_FAM=${HW_SOC_FAM:-Unknown}"
+  echo "HW_ANDROID=${HW_ANDROID:-Unknown}"
+  echo "HW_KERNEL=${HW_KERNEL:-Unknown}"
+  echo "HW_ROOT_MGR=${HW_ROOT_MGR:-Unknown}"
+  echo "HW_CPU_CLUSTERS=${HW_CPU_CLUSTERS:-Dynamic}"
+  echo "HW_GPU_ARCH=${HW_GPU_ARCH:-Generic}"
+  echo "HW_GED_SUPPORTED=${HW_GED_SUPPORTED:-0}"
+  echo "HW_FPSGO_SUPPORTED=${HW_FPSGO_SUPPORTED:-0}"
+  echo "HW_MTK_THERM_SUPPORTED=${HW_MTK_THERM_SUPPORTED:-0}"
+  echo "BATT_PROV=$BATT_PROV"
+  echo "BATT_CAP=${BATT_CAP:-UNAVAILABLE}"
+  echo "BATT_STATUS=${BATT_STATUS:-UNAVAILABLE}"
+  echo "BATT_MV=$BATT_MV"
+  echo "BATT_MA=$BATT_MA"
+  echo "BATT_HEALTH_STR=${BATT_HEALTH_STR:-UNAVAILABLE}"
+  echo "BATT_HEALTH_PCT=$BATT_HEALTH_PCT"
+  echo "BATT_CYCLES=${BATT_CYCLES:-UNAVAILABLE}"
+  echo "RAM_PROV=ACTUAL"
+  echo "RAM_USED_MB=$RAM_USED_MB"
+  echo "RAM_TOTAL_MB=$RAM_TOTAL_MB"
+  echo "RAM_PCT=$RAM_PCT"
+  echo "RAM_AVAIL_MB=${RAM_AVAIL_MB:-0}"
+  echo "RAM_CACHE_MB=${RAM_CACHE_MB:-0}"
+  echo "ZRAM_USED_MB=$ZRAM_USED_MB"
+  echo "ZRAM_TOTAL_MB=$ZRAM_TOTAL_MB"
+  echo "ZRAM_ALGO=${ZRAM_ALGO:-lzo-rle}"
+  echo "STORAGE_TOTAL_GB=${STORAGE_TOTAL_GB:-N/A}"
+  echo "STORAGE_FREE_GB=${STORAGE_FREE_GB:-N/A}"
+  echo "HW_STORAGE_TYPE=${HW_STORAGE_TYPE:-UFS}"
+  echo "HW_MANUFACTURER=${HW_MANUFACTURER:-Unknown}"
+  echo "HW_BRAND=${HW_BRAND:-Unknown}"
+  echo "HW_PRODUCT=${HW_PRODUCT:-Unknown}"
+  echo "HW_SOC_MFG=${HW_SOC_MFG:-Unknown}"
+  echo "HW_ARCH=${HW_ARCH:-arm64-v8a}"
+  echo "HW_DISPLAY_HZ=${HW_DISPLAY_HZ:-60/90/120Hz}"
+  echo "HW_VULKAN_CAP=${HW_VULKAN_CAP:-SUPPORTED}"
+  echo "CAP_CPU_DVFS=${CAP_CPU_DVFS:-UNKNOWN}"
+  echo "CAP_GPU_DVFS=${CAP_GPU_DVFS:-UNKNOWN}"
+  echo "CAP_EEM_VOLT=${CAP_EEM_VOLT:-UNSUPPORTED}"
+  echo "CAP_THERMAL_PROC=${CAP_THERMAL_PROC:-UNSUPPORTED}"
+  echo "CAP_GED_BOOST=${CAP_GED_BOOST:-UNSUPPORTED}"
+  echo "CAP_FPSGO=${CAP_FPSGO:-UNSUPPORTED}"
+  echo "CAP_CPUSET_EAS=${CAP_CPUSET_EAS:-UNKNOWN}"
+  echo "CAP_CHARGER_BYPASS=${CAP_CHARGER_BYPASS:-UNSUPPORTED}"
+  echo "CAP_ZRAM_TUNE=${CAP_ZRAM_TUNE:-SUPPORTED}"
+  echo "CAP_ZYGISK_SPOOF=${CAP_ZYGISK_SPOOF:-SUPPORTED}"
+  echo "RUNTIME_VERIFIED_STATE=${RUNTIME_VERIFIED_STATE:-NOT_RUNTIME_VERIFIED}"
+  echo "AVAIL_IO_SCHEDULERS=${AVAIL_IOSCHED}"
+  echo "GPU_MODE=${GPU_MODE:-balance}"
+  echo "CRIT_BATT_PCT=${CRIT_BATT_PCT:-10}"
+  echo "CUSTOM_CPU_MIN_PCT=${CUSTOM_CPU_MIN_PCT:-20}"
+  echo "CUSTOM_CPU_MAX_PCT=${CUSTOM_CPU_MAX_PCT:-90}"
+  echo "CUSTOM_CPU_GOV=${CUSTOM_CPU_GOV:-schedutil}"
+  echo "CUSTOM_GPU_MODE=${CUSTOM_GPU_MODE:-balance}"
+  echo "CUSTOM_SWAPPINESS=${CUSTOM_SWAPPINESS:-100}"
+  echo "CUSTOM_TOUCH_LEVEL=${CUSTOM_TOUCH_LEVEL:-3}"
+  echo "LOAD_AVG=${LOAD_AVG:-0.0}"
+  echo "GPU_PROV=$GPU_PROV"
+  echo "GPU_FREQ_MHZ=$GPU_FREQ_MHZ"
+  echo "GPU_LOAD_PCT=$GPU_LOAD_PCT"
+  echo "CPU_GOV=$GOV0"
+  echo "AVAIL_GOVS=$AVAIL_GOVS"
+  echo "DAEMON_AI=$ST_AI"
+  echo "DAEMON_BATTMON=$ST_BATTMON"
+  echo "DAEMON_KTUNER=$ST_KTUNER"
+  echo "DAEMON_DYNBAT=$ST_DYNBAT"
+  echo "DAEMON_THERMCORE=$ST_THERMCORE"
+  echo "DAEMON_FPSMON=$ST_FPSMON"
+  compute_performance_intelligence
+  _SESS_ST="IDLE"
+  _OVL_ALLOW="0"
+  if [ -f "$STATE_DIR/game_session_state.env" ]; then
+    . "$STATE_DIR/game_session_state.env" 2>/dev/null
+    _SESS_ST="${SESSION_STATE:-IDLE}"
+    _OVL_ALLOW="${OVERLAY_ALLOWED:-0}"
+  fi
+  echo "SESSION_STATE=$_SESS_ST"
+  echo "OVERLAY_ALLOWED=$_OVL_ALLOW"
+  echo "AUTO_FLOATING_HUD=${AUTO_FLOATING_HUD:-1}"
+  echo "HUD_POLL_INTERVAL_MS=${HUD_POLL_INTERVAL_MS:-2000}"
+  echo "FPS_GREEN_PCT=${FPS_GREEN_PCT:-85}"
+  echo "FPS_YELLOW_PCT=${FPS_YELLOW_PCT:-60}"
+  echo "SMART_RESOURCE_MGR=${SMART_RESOURCE_MGR:-1}"
+  echo "ADAPTIVE_GAMING_ENGINE=${ADAPTIVE_GAMING_ENGINE:-1}"
+  if [ -f "$STATE_DIR/fps_session_summary.env" ]; then
+    cat "$STATE_DIR/fps_session_summary.env" 2>/dev/null
+  fi
+  echo "=== THERMOD_REPORT ==="
+  if [ -f "$STATE_DIR/thermal_zone_map.env" ]; then
+    . "$STATE_DIR/thermal_zone_map.env" 2>/dev/null
+    _fast_tz_read() {
+      _ft_node="$1"; _ft_name="$2"
+      _FT_OUT="UNAVAILABLE|0|None|UNAVAILABLE"; _FT_DC=0
+      if [ -n "$_ft_node" ] && [ -f "$_ft_node" ]; then
+        _ft_raw=""
+        read -r _ft_raw < "$_ft_node" 2>/dev/null || _ft_raw=""
+        set -- $_ft_raw
+        _ft_tok="$1"
+        case "$_ft_tok" in
+          ""|"-"|"0"|"-127000"|"-274000"|*[!0-9-]*) return 1 ;;
+        esac
+        if [ "$_ft_tok" -le 0 ] 2>/dev/null; then return 1; fi
+        if [ "$_ft_tok" -ge 1000 ] 2>/dev/null; then _FT_DC=$((_ft_tok / 100))
+        elif [ "$_ft_tok" -ge 120 ] 2>/dev/null; then _FT_DC="$_ft_tok"
+        else _FT_DC=$((_ft_tok * 10)); fi
+        if [ "$_FT_DC" -gt 50 ] && [ "$_FT_DC" -lt 1500 ]; then
+          _ft_i=$((_FT_DC / 10)); _ft_d=$((_FT_DC % 10))
+          _FT_OUT="${_ft_i}.${_ft_d}°C|${_FT_DC}|${_ft_name}|ACTUAL"
+          return 0
+        fi
+      fi
+      return 1
+    }
+    _fast_tz_read "$TZ_NODE_CPU" "$TZ_NAME_CPU"; _S_CPU="$_FT_OUT"; _c_dc="$_FT_DC"
+    _fast_tz_read "$TZ_NODE_GPU" "$TZ_NAME_GPU"; _S_GPU="$_FT_OUT"
+    if [ "$_S_GPU" = "UNAVAILABLE|0|None|UNAVAILABLE" ] && [ "$_c_dc" -gt 0 ] 2>/dev/null; then
+      _g_dc=$((_c_dc - 20))
+      _S_GPU="$((_g_dc / 10)).$((_g_dc % 10))°C|${_g_dc}|SoC-Die-Shared(mtktscpu)|ESTIMATED"
+    fi
+    _fast_tz_read "$TZ_NODE_SOC" "$TZ_NAME_SOC"; _S_SOC="$_FT_OUT"
+    _fast_tz_read "$TZ_NODE_BAT" "$TZ_NAME_BAT"; _S_BAT="$_FT_OUT"
+    _fast_tz_read "$TZ_NODE_PMIC" "$TZ_NAME_PMIC"; _S_PMIC="$_FT_OUT"
+    _fast_tz_read "$TZ_NODE_PA" "$TZ_NAME_PA"; _S_PA="$_FT_OUT"
+    _fast_tz_read "$TZ_NODE_WIFI" "$TZ_NAME_WIFI"; _S_WIFI="$_FT_OUT"
+    echo "DOMAIN_CPU=$_S_CPU"
+    echo "DOMAIN_GPU=$_S_GPU"
+    echo "DOMAIN_SOC=$_S_SOC"
+    echo "DOMAIN_BAT=$_S_BAT"
+    echo "DOMAIN_PMIC=$_S_PMIC"
+    echo "DOMAIN_PA=$_S_PA"
+    echo "DOMAIN_WIFI=$_S_WIFI"
+  else
+    "$MODDIR/system/bin/thermod" status 2>/dev/null
+  fi
+  echo "=== CPU_FREQS ==="
+  for _cdir in /sys/devices/system/cpu/cpu[0-9]*; do
+    [ -d "$_cdir" ] || continue
+    _cid="${_cdir##*/cpu}"
+    _cf="$_cdir/cpufreq"
+    _on="1"
+    [ -f "$_cdir/online" ] && { read -r _on < "$_cdir/online" 2>/dev/null || _on="1"; }
+    if [ -f "$_cf/scaling_cur_freq" ]; then
+      _cur=0; _min=0; _max=0; _gov="schedutil"
+      read -r _cur < "$_cf/scaling_cur_freq" 2>/dev/null || _cur=0
+      read -r _min < "$_cf/scaling_min_freq" 2>/dev/null || _min=0
+      read -r _max < "$_cf/scaling_max_freq" 2>/dev/null || _max=0
+      read -r _gov < "$_cf/scaling_governor" 2>/dev/null || _gov="schedutil"
+      echo "${_cid}:${_cur:-0},${_min:-0},${_max:-0},${_on:-1},${_gov:-schedutil}"
+    else
+      echo "${_cid}:0,0,0,${_on:-1},offline"
+    fi
+  done
+  echo "=== GAMELIST ==="
+  if [ -f "$MODDIR/cortex/thunderclash/gamelist.txt" ]; then
+    while IFS= read -r _gline || [ -n "$_gline" ]; do
+      [ -n "$_gline" ] && echo "$_gline"
+    done < "$MODDIR/cortex/thunderclash/gamelist.txt"
+  fi
+  echo "=== OCORE_STATUS_END ==="
+}
+
+# ==============================================================================
+# STRICT ALLOWLIST COMMAND ROUTER
+# ==============================================================================
+cmd=$(sanitize_token "$1")
+case "$cmd" in
+  status|"")
+    print_full_status
+    ;;
+  hw_scan)
+    scan_hardware_capabilities
+    cat "$STATE_DIR/hw_capabilities.env" 2>/dev/null
+    ;;
+  config_migrate)
+    migrate_config
+    ;;
+  config_backup)
+    backup_user_profile "$2"
+    ;;
+  config_restore)
+    restore_user_profile "$2"
+    ;;
+  config_get)
+    cat "$OCORE_CONF" 2>/dev/null
+    ;;
+  config_set)
+    _cs_k=$(sanitize_token "$2")
+    _cs_v=$(sanitize_token "$3")
+    if save_ocore_key "$_cs_k" "$_cs_v"; then
+      evaluate_and_apply_arbiter >/dev/null 2>&1
+      log_tx "APPLIED" "config_set" "${_cs_k}=${_cs_v}"
+      echo "[OK] Committed transaction: ${_cs_k}=${_cs_v}"
+    else
+      log_tx "ROLLED_BACK" "config_set" "Failed validation for ${_cs_k}=${_cs_v}"
+      echo "[ROLLED_BACK] Transaction failed for ${_cs_k}=${_cs_v}"
+      exit 1
+    fi
+    ;;
+  arbiter_sync)
+    evaluate_and_apply_arbiter
+    ;;
+  manual_override)
+    set_manual_override "$2"
+    ;;
+  safe_mode)
+    _sm_v=$(sanitize_int "$2" "0")
+    save_ocore_key "SAFE_MODE" "$_sm_v"
+    if [ "$_sm_v" = "1" ]; then
+      apply_eem_voltage "STOCK" >/dev/null 2>&1
+      evaluate_and_apply_arbiter >/dev/null 2>&1
+      log_tx "APPLIED" "safe_mode" "Safe Mode ENABLED"
+      echo "[OK] Ocore Safe Mode ENABLED (Priority #2 Override Active)"
+    else
+      evaluate_and_apply_arbiter >/dev/null 2>&1
+      log_tx "APPLIED" "safe_mode" "Safe Mode DISABLED"
+      echo "[OK] Ocore Safe Mode DISABLED"
+    fi
+    ;;
+  profile)
+    set_global_profile "$2"
+    ;;
+  apply_temp_profile)
+    evaluate_and_apply_arbiter
+    ;;
+  one_tap_boost)
+    sh "$MODDIR/cortex/cache/clear.sh" >/dev/null 2>&1
+    "$MODDIR/cortex/cache/flushram" >/dev/null 2>&1
+    sync
+    safe_write_node "RAM_BOOST" "/proc/sys/vm/drop_caches" "3"
+    log_tx "APPLIED" "one_tap_boost" "Flushed RAM and dropped kernel caches"
+    echo "[OK] Ocore One-Tap Optimization completed (RAM flushed & caches dropped)"
+    ;;
+  volt_profile)
+    apply_eem_voltage "$2"
+    ;;
+  volt_custom)
+    apply_eem_voltage "CUSTOM" "$2" "$3" "$4" "$5"
+    ;;
+  eem_verify_persist)
+    verify_eem_persistence_if_needed
+    ;;
+  schedutil_tune)
+    _st_v=$(sanitize_int "$2" "1")
+    save_ocore_key "SCHEDUTIL_TUNE_ENABLE" "$_st_v"
+    [ "$_st_v" = "1" ] && apply_schedutil_ratelimits "$GLOBAL_PROFILE"
+    log_tx "APPLIED" "schedutil_tune" "Schedutil Tune=$_st_v"
+    echo "[OK] Schedutil Rate-Limit Optimizer set to: $_st_v"
+    ;;
+  eem_guard)
+    _eg_v=$(sanitize_int "$2" "1")
+    save_ocore_key "EEM_PERSIST_GUARD" "$_eg_v"
+    log_tx "APPLIED" "eem_guard" "EEM Persistence Guard=$_eg_v"
+    echo "[OK] EEM Persistence Guard set to: $_eg_v"
+    ;;
+  cpuset_eas)
+    apply_cpuset_eas_opt "$2"
+    ;;
+  io_opt)
+    apply_io_queue_opt "$2" "$3"
+    ;;
+  cpu_engine)
+    set_cpu_engine "$2"
+    ;;
+  thermal_engine)
+    set_thermal_engine "$2"
+    ;;
+  trip_policy)
+    _tp_v=$(sanitize_int "$2" "0")
+    save_ocore_key "ALLOW_TRIP_POINT_MOD" "$_tp_v"
+    "$MODDIR/system/bin/thermod" trip_policy "$_tp_v"
+    ;;
+  therm_thresholds)
+    _tt_dom=$(sanitize_token "$2")
+    _tt_w=$(sanitize_int "$3" "45")
+    _tt_h=$(sanitize_int "$4" "48")
+    _tt_c=$(sanitize_int "$5" "51")
+    case "$_tt_dom" in
+      cpu|CPU)
+        save_ocore_key "CPU_WARM_C" "$_tt_w"; save_ocore_key "CPU_HOT_C" "$_tt_h"; save_ocore_key "CPU_CRIT_C" "$_tt_c"
+        ;;
+      gpu|GPU)
+        save_ocore_key "GPU_WARM_C" "$_tt_w"; save_ocore_key "GPU_HOT_C" "$_tt_h"; save_ocore_key "GPU_CRIT_C" "$_tt_c"
+        ;;
+      soc|SOC|ap|AP)
+        save_ocore_key "SOC_WARM_C" "$_tt_w"; save_ocore_key "SOC_HOT_C" "$_tt_h"; save_ocore_key "SOC_CRIT_C" "$_tt_c"
+        ;;
+      bat|BAT|battery)
+        save_ocore_key "BAT_WARM_C" "$_tt_w"; save_ocore_key "BAT_HOT_C" "$_tt_h"; save_ocore_key "BAT_CRIT_C" "$_tt_c"
+        ;;
+      *)
+        _tt_w=$(sanitize_int "${2:-45}" "45")
+        _tt_h=$(sanitize_int "${3:-48}" "48")
+        _tt_c=$(sanitize_int "${4:-51}" "51")
+        _tt_hy=$(sanitize_int "${5:-2}" "2")
+        save_ocore_key "BAT_WARM_C" "$_tt_w"; save_ocore_key "BAT_HOT_C" "$_tt_h"; save_ocore_key "BAT_CRIT_C" "$_tt_c"
+        save_ocore_key "THERM_HYST_C" "$_tt_hy"
+        ;;
+    esac
+    [ -n "$6" ] && save_ocore_key "THERM_HYST_C" "$(sanitize_int "$6" "2")"
+    [ -n "$7" ] && save_ocore_key "THERM_COOLDOWN_SEC" "$(sanitize_int "$7" "30")"
+    log_tx "APPLIED" "therm_thresholds" "Updated thermal thresholds ($_tt_dom: $_tt_w/$_tt_h/$_tt_c)"
+    echo "[OK] Thermal thresholds updated ($_tt_dom: Warm=${_tt_w}°C Hot=${_tt_h}°C Crit=${_tt_c}°C)"
+    ;;
+  daemon)
+    manage_daemon "$2" "$3"
+    ;;
+  batt_div|ocore_div)
+    _bd_div=$(sanitize_token "$2")
+    save_ocore_key "OCORE_BATTMON_DIV" "$_bd_div"
+    setprop persist.sys.ocore.screenoff_div "$_bd_div" 2>/dev/null
+    manage_daemon ocore_battmon restart
+    ;;
+  thunder_lock)
+    _tl_v=$(sanitize_int "$2" "0")
+    save_ocore_key "THUNDER_LOCK_FREQ" "$_tl_v"
+    [ "$_tl_v" = "0" ] && unlock_cpu_nodes
+    log_tx "APPLIED" "thunder_lock" "Hard Frequency Lock=$_tl_v"
+    echo "[OK] Ocore Hard Frequency Lock set to: $_tl_v"
+    ;;
+  governor)
+    _gov_v=$(sanitize_token "$2")
+    unlock_cpu_nodes
+    run_tracked "CPU_GOV" "Set governor to $_gov_v" sh "$MODDIR/cortex/cpu/gov.sh" "$_gov_v"
+    log_tx "APPLIED" "governor" "Governor=$_gov_v"
+    ;;
+  gpu_mode)
+    apply_gpu_mode_verified "$2"
+    ;;
+  cpu_policy_set)
+    set_cpu_policy_limits "$2" "$3" "$4" "$5"
+    ;;
+  custom_profile)
+    _cp_min=$(sanitize_int "${2:-20}" "20")
+    _cp_max=$(sanitize_int "${3:-90}" "90")
+    _cp_gov=$(sanitize_token "${4:-schedutil}")
+    _cp_gpu=$(sanitize_token "${5:-balance}")
+    _cp_swp=$(sanitize_int "${6:-100}" "100")
+    _cp_tch=$(sanitize_int "${7:-3}" "3")
+    save_ocore_key "CUSTOM_CPU_MIN_PCT" "$_cp_min"
+    save_ocore_key "CUSTOM_CPU_MAX_PCT" "$_cp_max"
+    save_ocore_key "CUSTOM_CPU_GOV" "$_cp_gov"
+    save_ocore_key "CUSTOM_GPU_MODE" "$_cp_gpu"
+    save_ocore_key "CUSTOM_SWAPPINESS" "$_cp_swp"
+    save_ocore_key "CUSTOM_TOUCH_LEVEL" "$_cp_tch"
+    save_ocore_key "GLOBAL_PROFILE" "custom"
+    apply_zram_vm "$_cp_swp" >/dev/null 2>&1
+    sh "$MODDIR/cortex/thunderclash/touch.sh" "$_cp_tch" >/dev/null 2>&1
+    evaluate_and_apply_arbiter >/dev/null 2>&1
+    log_tx "APPLIED" "custom_profile" "Custom Profile applied (CPU:${_cp_min}%-${_cp_max}% $_cp_gov, GPU:$_cp_gpu, Swp:$_cp_swp, Touch:$_cp_tch)"
+    echo "[OK] Custom Profile saved and applied (${_cp_min}%-${_cp_max}% $_cp_gov)"
+    ;;
+  touch)
+    _tch_lvl=$(sanitize_int "$2" "2")
+    save_ocore_key "TOUCH_LEVEL" "$_tch_lvl"
+    run_tracked "TOUCH" "Set touch level $_tch_lvl" sh "$MODDIR/cortex/thunderclash/touch.sh" "$_tch_lvl"
+    log_tx "APPLIED" "touch" "Touch Level=$_tch_lvl"
+    echo "[OK] Touch response level set to: $_tch_lvl"
+    ;;
+  refresh)
+    _ref_idx=$(sanitize_int "$2" "-1")
+    save_ocore_key "REFRESH_IDX" "$_ref_idx"
+    echo "$_ref_idx" > "$MODDIR/cortex/thunderclash/refresh_index.txt"
+    run_tracked "REFRESH" "Set refresh index $_ref_idx" sh "$MODDIR/cortex/thunderclash/refresh.sh" "$_ref_idx"
+    log_tx "APPLIED" "refresh" "Refresh Index=$_ref_idx"
+    ;;
+  renderer)
+    apply_renderer_pipeline "$2"
+    ;;
+  game_mode_opt)
+    _gmo_v=$(sanitize_token "$2")
+    case "$_gmo_v" in
+      auto|manual|per_game|disabled)
+        save_ocore_key "GAME_DETECT_MODE" "$_gmo_v"
+        evaluate_and_apply_arbiter >/dev/null 2>&1
+        log_tx "APPLIED" "game_mode_opt" "Game Detection Mode=$_gmo_v"
+        echo "[OK] Game Detection Mode set to: $_gmo_v"
+        ;;
+      *)
+        log_tx "FAILED" "game_mode_opt" "Invalid mode '$_gmo_v'"
+        echo "[ERROR] Invalid game detection mode: $_gmo_v"
+        ;;
+    esac
+    ;;
+  game_enter)
+    enter_game_session "$2"
+    ;;
+  game_exit)
+    exit_game_session
+    ;;
+  game_cfg)
+    set_per_game_config "$2" "$3" "$4" "$5" "$6"
+    ;;
+  game_remove|gamelist_remove)
+    remove_game_pkg "$2"
+    ;;
+  gamelist_get)
+    sync_gamelist_artifacts
+    cat "$MODDIR/cortex/thunderclash/gamelist.txt" 2>/dev/null
+    ;;
+  gamelist_add)
+    _ga_pkg=$(sanitize_token "$2")
+    if add_game_to_gamelist "$_ga_pkg"; then
+      log_tx "APPLIED" "gamelist_add" "Added $_ga_pkg to cortex/thunderclash/gamelist.txt"
+    else
+      log_tx "FAILED" "gamelist_add" "Rejected $_ga_pkg"
+      exit 1
+    fi
+    ;;
+  gamelist_sync)
+    sync_gamelist_artifacts
+    log_tx "APPLIED" "gamelist_sync" "Synchronized cortex/thunderclash/gamelist.txt & ocoreApplist.json"
+    echo "[OK] Synchronized GameList across module and companion app"
+    ;;
+  game_session_state|game_session_status|session_status)
+    if [ -f "$STATE_DIR/game_session_state.env" ]; then
+      cat "$STATE_DIR/game_session_state.env" 2>/dev/null
+    else
+      echo "SESSION_STATE=IDLE"
+      echo "ACTIVE_GAME_PKG=None"
+      echo "ACTIVE_GAME_PID=0"
+      echo "OVERLAY_ALLOWED=0"
+      echo "AUTO_FLOATING_HUD=${AUTO_FLOATING_HUD:-1}"
+    fi
+    ;;
+  auto_hud)
+    _ah_v=$(sanitize_int "$2" "1")
+    save_ocore_key "AUTO_FLOATING_HUD" "$_ah_v"
+    if [ "$_ah_v" = "0" ]; then
+      write_game_session_state "OVERLAY_HIDDEN" "None" "0" "0" "AutoHudDisabled"
+      command -v am >/dev/null 2>&1 && am startservice -n id.ocore.gamecontrol/.OverlayService -a id.ocore.gamecontrol.ACTION_GAME_EXIT >/dev/null 2>&1 &
+    fi
+    log_tx "APPLIED" "auto_hud" "AUTO_FLOATING_HUD=$_ah_v"
+    echo "[OK] Auto Floating FPS Pill set to: $_ah_v"
+    ;;
+  hud_poll)
+    _hp_v=$(sanitize_int "$2" "2000")
+    [ "$_hp_v" -lt 500 ] && _hp_v=500
+    [ "$_hp_v" -gt 10000 ] && _hp_v=10000
+    save_ocore_key "HUD_POLL_INTERVAL_MS" "$_hp_v"
+    log_tx "APPLIED" "hud_poll" "HUD_POLL_INTERVAL_MS=$_hp_v"
+    echo "[OK] HUD Polling Interval set to: ${_hp_v}ms"
+    ;;
+  fps_thresholds)
+    _ft_g=$(sanitize_int "${2:-85}" "85")
+    _ft_y=$(sanitize_int "${3:-60}" "60")
+    save_ocore_key "FPS_GREEN_PCT" "$_ft_g"
+    save_ocore_key "FPS_YELLOW_PCT" "$_ft_y"
+    log_tx "APPLIED" "fps_thresholds" "Green=${_ft_g}% Yellow=${_ft_y}%"
+    echo "[OK] FPS Color Thresholds updated (Green >= ${_ft_g}%, Yellow >= ${_ft_y}%)"
+    ;;
+  fps_history)
+    [ -f "$STATE_DIR/fps_session_summary.env" ] && cat "$STATE_DIR/fps_session_summary.env" 2>/dev/null
+    echo "=== FPS_SAMPLES ==="
+    [ -f "$LOG_DIR/fps_history.log" ] && tail -n 50 "$LOG_DIR/fps_history.log" 2>/dev/null || true
+    ;;
+  adaptive_workload)
+    evaluate_adaptive_gaming_workload "$2"
+    ;;
+  config_integrity)
+    verify_and_backup_config_integrity
+    ;;
+  frame_stats)
+    get_frame_stability_stats "$2"
+    ;;
+  perf_intel)
+    compute_performance_intelligence
+    ;;
+  recovery)
+    run_recovery_action "$2" "$3"
+    ;;
+  ocore_prop|ocore_sysprop)
+    _op_key=$(sanitize_token "$2")
+    _op_val=$(sanitize_token "$3")
+    _prop_name="persist.sys.ocore__conf.$_op_key"
+    setprop "$_prop_name" "$_op_val" 2>/dev/null
+    case "$_op_key" in
+      SFL)
+        if [ "$_op_val" = "1" ]; then
+          resetprop -n debug.sf.early_phase_offset_ns 500000 2>/dev/null
+          resetprop -n debug.sf.early_app_phase_offset_ns 500000 2>/dev/null
+          resetprop -n debug.sf.high_fps_early_phase_offset_ns 6100000 2>/dev/null
+          resetprop -n debug.sf.high_fps_late_app_phase_offset_ns 100000 2>/dev/null
+        fi
+        ;;
+      schedtunes)
+        if [ "$_op_val" = "1" ]; then
+          safe_write_node "SCHED" "/proc/sys/kernel/sched_migration_cost_ns" "50000"
+          safe_write_node "SCHED" "/proc/sys/kernel/sched_min_granularity_ns" "1000000"
+          safe_write_node "SCHED" "/proc/sys/kernel/sched_wakeup_granularity_ns" "1500000"
+        fi
+        ;;
+      dnd)
+        save_ocore_key "GAME_DND_ENABLE" "$_op_val"
+        if [ "$_op_val" = "1" ]; then
+          echo "on" > "$MODDIR/cortex/thunderclash/dnd.txt"
+          sh "$MODDIR/cortex/thunderclash/dnd.sh" --enable >/dev/null 2>&1
+        else
+          echo "off" > "$MODDIR/cortex/thunderclash/dnd.txt"
+          sh "$MODDIR/cortex/thunderclash/dnd.sh" --disable >/dev/null 2>&1
+        fi
+        ;;
+      APreload)
+        save_ocore_key "GAME_PRELOAD_ENABLE" "$_op_val"
+        ;;
+      logd)
+        if [ "$_op_val" = "1" ]; then
+          stop logd 2>/dev/null
+          safe_write_node "TRACE" "/sys/kernel/tracing/tracing_on" "0" "0644" "0" "1"
+        else
+          start logd 2>/dev/null
+        fi
+        ;;
+    esac
+    log_tx "APPLIED" "ocore_prop" "$_op_key=$_op_val"
+    echo "[OK] $_op_key = $_op_val"
+    ;;
+  bypass_chg)
+    _bc_v=$(sanitize_int "$2" "0")
+    _bc_node=$(detect_charging_node)
+    if [ "$_bc_node" = "UNSUPPORTED" ]; then
+      save_ocore_key "BYPASS_CHG_ENABLE" "0"
+      log_tx "UNSUPPORTED" "bypass_chg" "Charger control node unsupported"
+      echo "[UNSUPPORTED] Bypass charging is not supported by this kernel"
+      exit 1
+    fi
+    save_ocore_key "BYPASS_CHG_ENABLE" "$_bc_v"
+    setprop persist.sys.ocore__conf.bypasschg "$_bc_v" 2>/dev/null
+    echo "$_bc_v" > "$AZ_CONF_DIR/bypasschgconfig/bypasschg"
+    echo "$_bc_v" > "$MODDIR/cortex/bypass/status.txt"
+    if [ "$_bc_v" = "1" ]; then
+      set_charging_switch disable_charging
+      chmod 0755 "$MODDIR/engine/ocore-bypass" 2>/dev/null
+      nohup /system/bin/sh "$MODDIR/engine/ocore-bypass" >>"$DAEMON_LOG" 2>&1 &
+      log_tx "APPLIED" "bypass_chg" "Bypass Charging enabled ($_bc_node)"
+      echo "[OK] Bypass Charging enabled ($_bc_node)"
+    else
+      graceful_stop_proc "ocore-bypass" "$STATE_DIR/pid_ocore_bypass"
+      set_charging_switch enable_charging
+      log_tx "APPLIED" "bypass_chg" "Bypass Charging disabled"
+      echo "[OK] Bypass Charging disabled"
+    fi
+    ;;
+  smart_charge)
+    _sc_v=$(sanitize_int "$2" "0")
+    _sc_stop=$(sanitize_int "${3:-85}" "85")
+    _sc_res=$(sanitize_int "${4:-75}" "75")
+    _sc_node=$(detect_charging_node)
+    if [ "$_sc_node" = "UNSUPPORTED" ]; then
+      save_ocore_key "SMART_CHARGE_LIMIT" "0"
+      log_tx "UNSUPPORTED" "smart_charge" "Charger control node unsupported"
+      echo "[UNSUPPORTED] Smart Charging hardware control node not supported on this device"
+      exit 1
+    fi
+    save_ocore_key "SMART_CHARGE_LIMIT" "$_sc_v"
+    save_ocore_key "SMART_CHARGE_STOP" "$_sc_stop"
+    save_ocore_key "SMART_CHARGE_RESUME" "$_sc_res"
+    [ "$_sc_v" = "0" ] && set_charging_switch enable_charging
+    log_tx "APPLIED" "smart_charge" "Smart Charge ($_sc_stop%/$_sc_res%)=$_sc_v"
+    echo "[OK] Smart Charge Limit ($_sc_stop% / $_sc_res%) set to: $_sc_v"
+    ;;
+  zram_vm)
+    apply_zram_vm "$2"
+    ;;
+  net_lowlat)
+    apply_net_tweaks "$2"
+    ;;
+  private_dns)
+    set_private_dns "$2"
+    ;;
+  mtk_boost)
+    set_mtk_apu_dram "$2"
+    ;;
+  deep_doze)
+    _dd_v=$(sanitize_int "$2" "0")
+    save_ocore_key "DEEP_DOZE_ENABLE" "$_dd_v"
+    if [ "$_dd_v" = "1" ]; then
+      dumpsys deviceidle enable >/dev/null 2>&1
+      dumpsys deviceidle force-idle >/dev/null 2>&1
+      log_tx "APPLIED" "deep_doze" "Deep Doze enabled"
+      echo "[OK] Deep Doze enabled & triggered"
+    else
+      dumpsys deviceidle unforce >/dev/null 2>&1
+      log_tx "APPLIED" "deep_doze" "Deep Doze unforced"
+      echo "[OK] Deep Doze unforced"
+    fi
+    ;;
+  ram_boost)
+    sh "$MODDIR/cortex/cache/clear.sh" >/dev/null 2>&1
+    "$MODDIR/cortex/cache/flushram" >/dev/null 2>&1
+    sync
+    safe_write_node "RAM_BOOST" "/proc/sys/vm/drop_caches" "3"
+    log_tx "APPLIED" "ram_boost" "Flushed RAM & dropped caches"
+    echo "[OK] RAM Flushed & Kernel Caches Dropped"
+    ;;
+  fstrim_now)
+    run_tracked "FSTRIM" "Ocore FSTrim" "$MODDIR/system/bin/sys.ocore-utilityconf" FSTrim >/dev/null
+    sm fstrim >/dev/null 2>&1
+    log_tx "APPLIED" "fstrim_now" "FSTrim completed"
+    echo "[OK] FSTrim completed"
+    ;;
+  list_packages)
+    pm list packages -3 2>/dev/null | sed 's/^package://' | sort | head -n 200
+    ;;
+  spoof_list)
+    MODDIR_OVERRIDE="$MODDIR" OCORE_DIR_OVERRIDE="$OCORE_DIR" sh "$MODDIR/cortex/ocore_json_tool.sh" list
+    ;;
+  spoof_bind)
+    bind_zygisk_spoof "$2" "$3" "$4"
+    ;;
+  spoof_unbind)
+    unbind_zygisk_spoof "$2"
+    ;;
+  spoof_reset)
+    reset_zygisk_spoof
+    ;;
+  spoof_audit)
+    MODDIR_OVERRIDE="$MODDIR" OCORE_DIR_OVERRIDE="$OCORE_DIR" sh "$MODDIR/cortex/ocore_json_tool.sh" audit
+    ;;
+  emergency_charge_recover)
+    emergency_charging_recovery
+    ;;
+  game_blacklist_get)
+    cat "$MODDIR/cortex/thunderclash/game_blacklist.txt" 2>/dev/null
+    ;;
+  game_blacklist_add)
+    _gba_p=$(sanitize_token "$2")
+    if validate_package_name "$_gba_p"; then
+      if ! grep -qx "$_gba_p" "$MODDIR/cortex/thunderclash/game_blacklist.txt" 2>/dev/null; then
+        echo "$_gba_p" >> "$MODDIR/cortex/thunderclash/game_blacklist.txt"
+      fi
+      log_tx "APPLIED" "game_blacklist_add" "Added $_gba_p to game_blacklist.txt"
+      echo "[OK] Added $_gba_p to Game Blacklist"
+    else
+      log_tx "FAILED" "game_blacklist_add" "Invalid package $_gba_p"
+      echo "[ERROR] Invalid package name: $_gba_p"
+      exit 1
+    fi
+    ;;
+  game_blacklist_remove)
+    _gbr_p=$(sanitize_token "$2")
+    if [ -n "$_gbr_p" ] && [ -f "$MODDIR/cortex/thunderclash/game_blacklist.txt" ]; then
+      grep -vx "$_gbr_p" "$MODDIR/cortex/thunderclash/game_blacklist.txt" > "$MODDIR/cortex/thunderclash/game_blacklist.txt.tmp" 2>/dev/null
+      mv -f "$MODDIR/cortex/thunderclash/game_blacklist.txt.tmp" "$MODDIR/cortex/thunderclash/game_blacklist.txt" 2>/dev/null
+      log_tx "APPLIED" "game_blacklist_remove" "Removed $_gbr_p from game_blacklist.txt"
+      echo "[OK] Removed $_gbr_p from Game Blacklist"
+    fi
+    ;;
+  debug_verbose)
+    _dv_v=$(sanitize_int "$2" "1")
+    save_ocore_key "DEBUG_VERBOSE" "$_dv_v"
+    log_tx "APPLIED" "debug_verbose" "Verbose logging=$_dv_v"
+    echo "[OK] Verbose Debug Logging set to: $_dv_v"
+    ;;
+  diag)
+    run_self_diagnostics
+    ;;
+  export_logs)
+    export_diagnostic_bundle
+    ;;
+  logs)
+    cat_type=$(sanitize_token "${2:-all}")
+    case "$cat_type" in
+      errors)
+        echo "=== ERRORS & WARNINGS LOG ($ERROR_LOG) ==="
+        if [ -s "$ERROR_LOG" ]; then tail -n 80 "$ERROR_LOG"; else echo "Zero errors recorded!"; fi
+        ;;
+      boot)
+        echo "=== BOOT & POST-FS-DATA TRACE ($BOOT_LOG) ==="
+        tail -n 100 "$BOOT_LOG" 2>/dev/null
+        ;;
+      volt)
+        echo "=== EEM VOLTAGE & SCHEDUTIL LOG ($VOLT_LOG) ==="
+        if [ -s "$VOLT_LOG" ]; then tail -n 80 "$VOLT_LOG"; else echo "No voltage logs yet."; fi
+        ;;
+      audit)
+        echo "=== KERNEL NODE WRITE & TRANSACTION AUDIT ==="
+        tail -n 50 "$TX_LOG" 2>/dev/null
+        echo ""
+        tail -n 80 "$AUDIT_LOG" 2>/dev/null
+        ;;
+      daemons)
+        echo "=== DAEMONS & WATCHDOG LOG ($DAEMON_LOG) ==="
+        tail -n 80 "$DAEMON_LOG" 2>/dev/null
+        ;;
+      thermod)
+        echo "=== OCORE THERMAL INTELLIGENCE LOG ==="
+        tail -n 80 "$THERMOD_DIR/logs/thermod.log" 2>/dev/null
+        ;;
+      perf)
+        echo "=== PERFORMANCE & GAMING SESSION HISTORY ==="
+        tail -n 60 "$GAME_SESS_LOG" 2>/dev/null
+        tail -n 60 "$PERF_HIST_LOG" 2>/dev/null
+        ;;
+      diag)
+        if [ ! -f "$LOG_DIR/self_diagnostic_report.log" ]; then
+          run_self_diagnostics >/dev/null 2>&1
+        fi
+        cat "$LOG_DIR/self_diagnostic_report.log" 2>/dev/null
+        ;;
+      all|*)
+        echo "=== [1] RECENT TRANSACTIONS ==="
+        tail -n 15 "$TX_LOG" 2>/dev/null
+        echo ""
+        echo "=== [2] RECENT ERRORS & WARNINGS ==="
+        if [ -s "$ERROR_LOG" ]; then tail -n 20 "$ERROR_LOG"; else echo "Zero errors recorded."; fi
+        echo ""
+        echo "=== [3] OCORE MASTER EVENTS ==="
+        tail -n 25 "$OCORE_LOG" 2>/dev/null
+        echo ""
+        echo "=== [4] EEM VOLTAGE & SCHEDUTIL LOG ==="
+        tail -n 20 "$VOLT_LOG" 2>/dev/null
+        echo ""
+        echo "=== [5] KERNEL NODE WRITE AUDIT ==="
+        tail -n 25 "$AUDIT_LOG" 2>/dev/null
+        ;;
+    esac
+    ;;
+  clear_logs)
+    for f in "$OCORE_LOG" "$AUDIT_LOG" "$DAEMON_LOG" "$ERROR_LOG" "$VOLT_LOG" "$PERF_HIST_LOG" "$GAME_SESS_LOG" "$TX_LOG" "$LOG_DIR/self_diagnostic_report.log" "$THERMOD_DIR/logs/thermod.log" "$AZ_CONF_DIR/sysmon.log"; do
+      : > "$f" 2>/dev/null
+    done
+    rm -f "$STATE_DIR"/crash_* "$STATE_DIR"/cooldown_* "$MODDIR"/ocoin_*.log "$MODDIR"/rairin_*.log /data/local/tmp/ocoin_*.log /data/local/tmp/rairin_*.log 2>/dev/null
+    for _pl in "$MODDIR"/ocore_*.log; do [ -f "$_pl" ] && : > "$_pl" 2>/dev/null; done
+    echo "[$(date "+%Y-%m-%d %H:%M:%S")] [INFO] [BOOT_LOG] Preserved boot trace header after clear_logs" > "$BOOT_LOG"
+    "$MODDIR/system/bin/sys.ocore-service" --clearlogs 2>/dev/null
+    verify_eem_persistence_if_needed >/dev/null 2>&1
+    evaluate_and_apply_arbiter >/dev/null 2>&1
+    log_tx "APPLIED" "clear_logs" "Cleared diagnostic logs and re-verified active state"
+    echo "[OK] All diagnostic logs cleared and active state re-verified"
+    ;;
+  guard|fpsgo|ged|zones|decrypt|encrypt)
+    "$MODDIR/system/bin/thermod" "$cmd" "$2"
+    ;;
+  *)
+    log_tx "FAILED" "unknown_cmd" "Disallowed command: $cmd"
+    echo "[ERROR] Disallowed or unknown ocorectl command: $cmd"
+    exit 1
+    ;;
+esac
